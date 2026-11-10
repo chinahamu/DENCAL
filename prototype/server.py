@@ -24,6 +24,7 @@ import patients
 HOST = "127.0.0.1"
 SCHEMA_VERSION = 5
 PATIENT_REGISTRATION_ROLE = "reception"
+PATIENT_SEARCH_ROLE = "reception"
 TRIAL_TARGET_ID = "demo-patient-001"
 AUDIT_OUTCOMES = {"success": "成功", "denied": "拒否", "failed": "失敗"}
 TRIAL_OPERATIONS = {
@@ -121,6 +122,9 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         if self.path == "/login":
             self.send_login()
             return
+        if self.path == "/patients/search":
+            self.show_patient_search()
+            return
         if self.path == "/patients/new":
             self.show_patient_registration()
             return
@@ -155,6 +159,8 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         )
         if role == PATIENT_REGISTRATION_ROLE:
             links += '<li><a href="/patients/new">患者登録</a></li>'
+        if role == PATIENT_SEARCH_ROLE:
+            links += '<li><a href="/patients/search">患者検索</a></li>'
         if role == "admin":
             links += '<li><a href="/audit">監査ログ</a></li>'
         trial_menu = f"<ul>{links}</ul>" if links else "<p>利用できる試作用操作はありません。</p>"
@@ -385,18 +391,154 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             target_id=target_id, action="patient-register", outcome=outcome,
         )
 
+    def show_patient_search(self):
+        try:
+            with closing(self.open_readonly_database()) as connection:
+                staff = self.current_staff(connection)
+        except sqlite3.Error as error:
+            self.database_error(error)
+            return
+
+        if staff is None:
+            self.redirect("/login")
+        elif staff[1] != PATIENT_SEARCH_ROLE:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>患者情報を閲覧する権限がありません。</p>")
+        else:
+            self.send_patient_search()
+
+    def send_patient_search(
+        self, status=HTTPStatus.OK, *, message="", matches=(), truncated=False,
+        filters=("", "", ""),
+    ):
+        number_filter, name_filter, date_filter = map(escape, filters)
+        rows = []
+        for patient_id, name, birth_date in matches:
+            number = patients.patient_number(patient_id)
+            rows.append(f"""
+                <tr><td>{number}</td><td>{escape(name)}</td><td>{escape(birth_date)}</td>
+                <td><form action="/patients/confirm" method="post">
+                  <button name="patient_number" value="{number}" aria-label="患者番号 {number} を確認">確認</button>
+                </form></td></tr>
+            """)
+        results = ""
+        if rows:
+            notice = (
+                f"<p>先頭{patients.SEARCH_LIMIT}件を表示しています。検索条件を絞り込んでください。</p>"
+                if truncated else ""
+            )
+            results = f"""
+                {notice}
+                <div class="table-scroll"><table>
+                  <caption>検索結果</caption>
+                  <thead><tr><th scope="col">患者番号</th><th scope="col">氏名</th>
+                    <th scope="col">生年月日</th><th scope="col">確認</th></tr></thead>
+                  <tbody>{"".join(rows)}</tbody>
+                </table></div>
+            """
+        self.send_page(status, f"""
+            <section aria-labelledby="search-heading">
+              <h2 id="search-heading">患者検索</h2>
+              <p>患者番号・氏名・生年月日のうち1項目以上を入力してください。</p>
+              <form action="/patients/search" method="post" autocomplete="off">
+                <label>患者番号 <input name="patient_number" maxlength="20" placeholder="P00000001" value="{number_filter}"></label>
+                <label>氏名（部分一致） <input name="name" maxlength="100" value="{name_filter}"></label>
+                <label>生年月日 <input type="date" name="birth_date" value="{date_filter}"></label>
+                <button>検索する</button>
+              </form>
+              <p role="status">{escape(message)}</p>
+              {results}
+              <p><a href="/">職員画面に戻る</a></p>
+            </section>
+        """)
+
+    def handle_patient_lookup(self, *, confirm):
+        action = "patient-view" if confirm else "patient-search"
+        try:
+            fields = self.read_form(max_fields=1 if confirm else 3)
+            number, = fields.get("patient_number", [""])
+            name, = fields.get("name", [""])
+            birth_date, = fields.get("birth_date", [""])
+            if confirm and not number.strip():
+                raise ValueError
+            criteria = patients.search_criteria(number, name, birth_date)
+            message = ""
+        except (KeyError, ValueError):
+            criteria = None
+            message = "患者番号・氏名・生年月日を確認してください。"
+
+        matches = []
+        truncated = False
+        try:
+            with closing(auth.connect(self.server.database)) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                staff = self.current_staff(connection)
+                allowed = staff is not None and staff[1] == PATIENT_SEARCH_ROLE
+                if allowed and criteria is not None:
+                    matches = patients.search(connection, *criteria)
+                    truncated = len(matches) > patients.SEARCH_LIMIT
+                    matches = matches[:patients.SEARCH_LIMIT]
+
+                if matches:
+                    for patient_id, _, _ in matches:
+                        audit.record_event(
+                            connection, actor_id=staff[0], target_id=patients.patient_number(patient_id),
+                            action=action, outcome="success",
+                        )
+                else:
+                    audit.record_event(
+                        connection, actor_id=staff[0] if staff else None, target_id=action,
+                        action=action, outcome="failed" if allowed else "denied",
+                    )
+        except sqlite3.Error as error:
+            self.database_error(error)
+            return
+
+        if staff is None:
+            self.redirect("/login")
+        elif not allowed:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>患者情報を閲覧する権限がありません。</p>")
+        elif message:
+            self.send_patient_search(HTTPStatus.BAD_REQUEST, message=message)
+        elif not matches:
+            status = HTTPStatus.NOT_FOUND if confirm else HTTPStatus.OK
+            self.send_patient_search(
+                status, message="該当する患者が見つかりません。",
+                filters=(number, name, birth_date),
+            )
+        elif confirm:
+            patient_id, name, birth_date = matches[0]
+            self.send_page(HTTPStatus.OK, f"""
+                <section aria-labelledby="patient-heading">
+                  <h2 id="patient-heading">患者情報の確認</h2>
+                  <dl>
+                    <dt>患者番号</dt><dd>{patients.patient_number(patient_id)}</dd>
+                    <dt>氏名</dt><dd>{escape(name)}</dd>
+                    <dt>生年月日</dt><dd>{escape(birth_date)}</dd>
+                  </dl>
+                  <p><a href="/patients/search">患者検索に戻る</a></p>
+                </section>
+            """)
+        else:
+            self.send_patient_search(
+                matches=matches, truncated=truncated, filters=(number, name, birth_date)
+            )
+
     def do_POST(self):
         if not self.is_local_request():
             return
         prefix, _, operation = self.path.rpartition("/")
         is_trial = prefix == "/api/trial" and operation in TRIAL_OPERATIONS
-        if self.path not in ("/login", "/logout", "/patients/new") and not is_trial:
+        is_patient_lookup = self.path in ("/patients/search", "/patients/confirm")
+        if self.path not in ("/login", "/logout", "/patients/new") and not (is_trial or is_patient_lookup):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if self.headers.get_all("Origin") != [self.server.origin]:
             self.send_error(HTTPStatus.FORBIDDEN)
             return
 
+        if is_patient_lookup:
+            self.handle_patient_lookup(confirm=self.path == "/patients/confirm")
+            return
         if self.path == "/patients/new":
             self.submit_patient_registration()
             return
