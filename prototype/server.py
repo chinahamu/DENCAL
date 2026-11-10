@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import closing
+from datetime import date
 from getpass import GetPassWarning
 from html import escape
 from http.cookies import CookieError, SimpleCookie
@@ -18,11 +19,12 @@ from urllib.parse import parse_qs
 
 import audit
 import auth
+import outpatient
 import patients
 
 
 HOST = "127.0.0.1"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 PATIENT_REGISTRATION_ROLE = "reception"
 PATIENT_SEARCH_ROLE = "reception"
 TRIAL_TARGET_ID = "demo-patient-001"
@@ -96,6 +98,9 @@ def initialize_database(path):
             version = 4
         if version == 4:
             patients.initialize_patients(connection)
+            version = 5
+        if version == 5:
+            outpatient.initialize_outpatient(connection)
             connection.execute(
                 "UPDATE prototype_metadata SET schema_version = ? WHERE id = 1",
                 (SCHEMA_VERSION,),
@@ -479,6 +484,8 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                     matches = matches[:patients.SEARCH_LIMIT]
 
                 if matches:
+                    if confirm:
+                        check_in_key = outpatient.new_form_key(connection, matches[0][0], staff[0])
                     for patient_id, _, _ in matches:
                         audit.record_event(
                             connection, actor_id=staff[0], target_id=patients.patient_number(patient_id),
@@ -506,22 +513,129 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                 filters=(number, name, birth_date),
             )
         elif confirm:
-            patient_id, name, birth_date = matches[0]
-            self.send_page(HTTPStatus.OK, f"""
-                <section aria-labelledby="patient-heading">
-                  <h2 id="patient-heading">患者情報の確認</h2>
-                  <dl>
-                    <dt>患者番号</dt><dd>{patients.patient_number(patient_id)}</dd>
-                    <dt>氏名</dt><dd>{escape(name)}</dd>
-                    <dt>生年月日</dt><dd>{escape(birth_date)}</dd>
-                  </dl>
-                  <p><a href="/patients/search">患者検索に戻る</a></p>
-                </section>
-            """)
+            self.send_patient_confirmation(matches[0], check_in_key, visit_date=date.today().isoformat())
         else:
             self.send_patient_search(
                 matches=matches, truncated=truncated, filters=(number, name, birth_date)
             )
+
+    def send_patient_confirmation(
+        self, patient, key, *, status=HTTPStatus.OK, message="", department="", visit_date="",
+    ):
+        patient_id, name, birth_date = patient
+        number = patients.patient_number(patient_id)
+        options = []
+        for code, label in outpatient.DEPARTMENTS.items():
+            selected = " selected" if code == department else ""
+            options.append(f'<option value="{code}"{selected}>{label}</option>')
+        self.send_page(status, f"""
+            <section aria-labelledby="patient-heading">
+              <h2 id="patient-heading">患者情報の確認</h2>
+              <dl>
+                <dt>患者番号</dt><dd>{number}</dd>
+                <dt>氏名</dt><dd>{escape(name)}</dd>
+                <dt>生年月日</dt><dd>{escape(birth_date)}</dd>
+              </dl>
+              <h3>外来受付</h3>
+              <p role="status">{escape(message)}</p>
+              <form action="/outpatient/check-in" method="post">
+                <input type="hidden" name="patient_number" value="{number}">
+                <input type="hidden" name="request_key" value="{escape(key)}">
+                <label>診療科 <select name="department" required>
+                  <option value="">選択してください</option>{"".join(options)}
+                </select></label>
+                <label>来院日 <input type="date" name="visit_date" value="{escape(visit_date)}" required></label>
+                <button>外来受付を登録する</button>
+              </form>
+              <p><a href="/patients/search">患者検索に戻る</a></p>
+            </section>
+        """)
+
+    def submit_outpatient_check_in(self):
+        patient_id, department, visit_date, key = None, "", "", ""
+        try:
+            fields = self.read_form(max_fields=4)
+            number, = fields["patient_number"]
+            department, = fields["department"]
+            visit_date, = fields["visit_date"]
+            key, = fields["request_key"]
+            patient_id, _, _ = patients.search_criteria(number, "", "")
+            if patient_id is None:
+                raise ValueError
+            outpatient.validate_visit(department, visit_date)
+            message = ""
+        except (KeyError, ValueError):
+            message = "患者番号・診療科・来院日を確認してください。"
+
+        status = HTTPStatus.BAD_REQUEST
+        visit_id = None
+        patient = None
+        target_id = outpatient.ACTION
+        try:
+            with closing(auth.connect(self.server.database)) as connection, connection:
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("BEGIN IMMEDIATE")
+                staff = self.current_staff(connection)
+                allowed = staff is not None and staff[1] == PATIENT_SEARCH_ROLE
+                outcome = "denied"
+                if allowed:
+                    outcome = "failed"
+                    if patient_id and outpatient.is_valid_form_key(connection, key, patient_id, staff[0]):
+                        matches = patients.search(connection, patient_id, "", "")
+                        if matches:
+                            patient = matches[0]
+                            target_id = patients.patient_number(patient_id)
+                        else:
+                            status = HTTPStatus.NOT_FOUND
+                            message = "対象の患者が見つかりません。"
+                    else:
+                        message = "患者検索から対象の患者を選び直してください。"
+
+                    if patient is not None and not message:
+                        try:
+                            visit_id, created = outpatient.check_in(
+                                connection, patient_id=patient_id, department=department,
+                                visit_date=visit_date, actor_id=staff[0], key=key,
+                            )
+                        except outpatient.CheckInConflict:
+                            status = HTTPStatus.CONFLICT
+                            message = "登録済みの受付内容と一致しません。患者検索から確認し直してください。"
+                        else:
+                            status = HTTPStatus.CREATED if created else HTTPStatus.OK
+                            outcome = "success" if created else None
+
+                if outcome is not None:
+                    audit.record_event(
+                        connection, actor_id=staff[0] if staff else None,
+                        target_id=target_id, action=outpatient.ACTION, outcome=outcome,
+                    )
+        except sqlite3.Error as error:
+            self.database_error(error)
+            return
+
+        if staff is None:
+            self.redirect("/login")
+        elif not allowed:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>外来受付を登録する権限がありません。</p>")
+        elif visit_id is not None:
+            self.send_page(status, f"""
+                <section aria-labelledby="checked-in-heading">
+                  <h2 id="checked-in-heading">外来受付登録済み</h2>
+                  <p>受付番号　{visit_id}</p>
+                  <p>患者番号　{target_id}</p>
+                  <p>氏名　{escape(patient[1])}</p>
+                  <p>生年月日　{escape(patient[2])}</p>
+                  <p>診療科　{outpatient.DEPARTMENTS[department]}</p>
+                  <p>来院日　{visit_date}</p>
+                  <p><a href="/patients/search">患者検索に戻る</a></p>
+                </section>
+            """)
+        elif patient is not None and status == HTTPStatus.BAD_REQUEST:
+            self.send_patient_confirmation(
+                patient, key, status=status, message=message, department=department, visit_date=visit_date,
+            )
+        else:
+            self.send_patient_search(status, message=message)
 
     def do_POST(self):
         if not self.is_local_request():
@@ -529,13 +643,16 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         prefix, _, operation = self.path.rpartition("/")
         is_trial = prefix == "/api/trial" and operation in TRIAL_OPERATIONS
         is_patient_lookup = self.path in ("/patients/search", "/patients/confirm")
-        if self.path not in ("/login", "/logout", "/patients/new") and not (is_trial or is_patient_lookup):
+        if self.path not in ("/login", "/logout", "/patients/new", "/outpatient/check-in") and not (is_trial or is_patient_lookup):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if self.headers.get_all("Origin") != [self.server.origin]:
             self.send_error(HTTPStatus.FORBIDDEN)
             return
 
+        if self.path == "/outpatient/check-in":
+            self.submit_outpatient_check_in()
+            return
         if is_patient_lookup:
             self.handle_patient_lookup(confirm=self.path == "/patients/confirm")
             return
