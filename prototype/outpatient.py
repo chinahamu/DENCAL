@@ -86,3 +86,34 @@ def check_in(connection, *, patient_id, department, visit_date, actor_id, key):
         (patient_id, department, visit_date, actor_id, key),
     )
     return cursor.lastrowid, True
+
+
+PAGE_SIZE = 50
+_VISIT_PATIENTS = """
+    SELECT outpatient_visits.id, patients.id, patients.name, patients.birth_date
+    FROM outpatient_visits JOIN patients ON patients.id = outpatient_visits.patient_id
+    WHERE outpatient_visits.department = ? AND outpatient_visits.visit_date = ?
+"""
+
+
+def parse_visit_id(value):
+    if not (1 <= len(value) <= 19 and value.isascii() and value.isdecimal()):
+        raise ValueError("受診IDの形式が正しくありません。")
+    visit_id = int(value)
+    if not 1 <= visit_id <= 2**63 - 1:
+        raise ValueError("受診IDの形式が正しくありません。")
+    return visit_id
+
+
+def list_visits(connection, department, visit_date, after_id):
+    return connection.execute(
+        _VISIT_PATIENTS + " AND outpatient_visits.id > ? ORDER BY outpatient_visits.id LIMIT ?",
+        (department, visit_date, after_id, PAGE_SIZE + 1),
+    ).fetchall()
+
+
+def find_visit(connection, department, visit_date, visit_id):
+    return connection.execute(
+        _VISIT_PATIENTS + " AND outpatient_visits.id = ?",
+        (department, visit_date, visit_id),
+    ).fetchone()
