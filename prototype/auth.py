@@ -14,6 +14,12 @@ import warnings
 SESSION_SECONDS = 30 * 60
 MAX_PASSWORD_BYTES = 256
 STAFF_ID = re.compile(r"[A-Za-z0-9_-]{1,40}")
+ROLE_LABELS = {
+    "reception": "受付",
+    "physician": "医師",
+    "nurse": "看護師",
+    "admin": "管理者",
+}
 
 
 def initialize_auth(connection):
@@ -35,6 +41,13 @@ def initialize_auth(connection):
     connection.execute("CREATE INDEX staff_sessions_staff_id ON staff_sessions(staff_id)")
 
 
+def initialize_staff_roles(connection):
+    connection.execute(
+        """ALTER TABLE staff ADD COLUMN role TEXT
+        CHECK (role IN ('reception', 'physician', 'nurse', 'admin'))"""
+    )
+
+
 def connect(database):
     return sqlite3.connect(database.as_uri() + "?mode=rw", uri=True)
 
@@ -45,7 +58,7 @@ def password_hash(password, salt):
     )
 
 
-def add_staff(database, staff_id):
+def add_staff(database, staff_id, role=None):
     if not STAFF_ID.fullmatch(staff_id):
         raise ValueError("職員IDは半角英数字・ハイフン・下線の1〜40文字を指定してください。")
     with warnings.catch_warnings():
@@ -61,12 +74,21 @@ def add_staff(database, staff_id):
     digest = password_hash(encoded, salt)
     with closing(connect(database)) as connection, connection:
         cursor = connection.execute(
-            """INSERT INTO staff (id, salt, password_hash) VALUES (?, ?, ?)
+            """INSERT INTO staff (id, salt, password_hash, role) VALUES (?, ?, ?, ?)
             ON CONFLICT(id) DO NOTHING""",
-            (staff_id, salt, digest),
+            (staff_id, salt, digest, role),
         )
         if cursor.rowcount != 1:
             raise ValueError("その職員IDは既に登録されています。")
+
+
+def set_staff_role(database, staff_id, role):
+    with closing(connect(database)) as connection, connection:
+        cursor = connection.execute(
+            "UPDATE staff SET role = ? WHERE id = ? AND active = 1", (role, staff_id)
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("有効な職員IDが見つかりません。")
 
 
 def disable_staff(database, staff_id):
@@ -104,11 +126,11 @@ def start_session(database, staff_id, password):
 
 def session_staff(connection, token):
     row = connection.execute(
-        """SELECT staff.id FROM staff_sessions JOIN staff ON staff.id = staff_sessions.staff_id
+        """SELECT staff.id, staff.role FROM staff_sessions JOIN staff ON staff.id = staff_sessions.staff_id
         WHERE token_hash = ? AND expires_at > ? AND staff.active = 1""",
         (sha256(token.encode("ascii")).digest(), int(time())),
     ).fetchone()
-    return row[0] if row else None
+    return row
 
 
 def end_session(database, token):
