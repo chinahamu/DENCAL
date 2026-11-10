@@ -26,7 +26,7 @@ import prescriptions
 
 
 HOST = "127.0.0.1"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 CLINICAL_NOTE_ACTIONS = {
     "/outpatient/draft": clinical_notes.ACTION,
     "/outpatient/draft-review": clinical_notes.REVIEW_ACTION,
@@ -69,7 +69,7 @@ def database_metadata(connection):
         raise ValueError("初期化情報が見つかりません。")
     version, initialized_at = row
     if version != SCHEMA_VERSION:
-        raise ValueError(f"対応していないスキーマ版です（検出値 {version}）。")
+        raise ValueError(f"対応していないスキーマ版です（検出値 {version}）。--db で新しいファイルを指定してください。")
     return version, initialized_at
 
 
@@ -86,46 +86,22 @@ def initialize_database(path):
             )
             """
         )
-        connection.execute(
+        initialized = connection.execute(
             """
             INSERT INTO prototype_metadata (id, schema_version, initialized_at)
-            VALUES (1, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            VALUES (1, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             ON CONFLICT(id) DO NOTHING
-            """
+            """,
+            (SCHEMA_VERSION,),
         )
-        version = connection.execute(
-            "SELECT schema_version FROM prototype_metadata WHERE id = 1"
-        ).fetchone()[0]
-        if version == 1:
+        if initialized.rowcount == 1:
             auth.initialize_auth(connection)
-            version = 2
-        if version == 2:
             auth.initialize_staff_roles(connection)
-            version = 3
-        if version == 3:
             audit.initialize_audit_log(connection)
-            version = 4
-        if version == 4:
             patients.initialize_patients(connection)
-            version = 5
-        if version == 5:
             outpatient.initialize_outpatient(connection)
-            version = 6
-        if version == 6:
-            clinical_notes.initialize_drafts(connection)
-            version = 7
-        if version == 7:
-            clinical_notes.initialize_finalization(connection)
-            version = 8
-        if version == 8:
-            clinical_notes.initialize_corrections(connection)
-            version = 9
-        if version == 9:
+            clinical_notes.initialize_notes(connection)
             prescriptions.initialize_orders(connection)
-            connection.execute(
-                "UPDATE prototype_metadata SET schema_version = ? WHERE id = 1",
-                (SCHEMA_VERSION,),
-            )
         database_metadata(connection)
 
 
@@ -811,16 +787,18 @@ class PrototypeHandler(BaseHTTPRequestHandler):
     def send_outpatient_visit(self, visit_date, department, visit, *, editor="", status=HTTPStatus.OK):
         visit_id, patient_id, name, birth_date = visit
         self.send_page(status, f"""
-            <section aria-labelledby="outpatient-visit-heading">
-              <h2 id="outpatient-visit-heading">外来受診の確認</h2>
-              <dl>
+            <section class="clinical-workbench" aria-labelledby="outpatient-visit-heading">
+              <header class="chart-context">
+                <h2 id="outpatient-visit-heading">外来診療録</h2>
+                <p class="chart-name">{escape(name)}</p>
+                <dl>
                 <dt>受診ID</dt><dd>{visit_id}</dd>
                 <dt>患者番号</dt><dd>{patients.patient_number(patient_id)}</dd>
-                <dt>氏名</dt><dd>{escape(name)}</dd>
                 <dt>生年月日</dt><dd>{escape(birth_date)}</dd>
                 <dt>診療科</dt><dd>{outpatient.DEPARTMENTS[department]}</dd>
                 <dt>来院日</dt><dd>{visit_date}</dd>
-              </dl>
+                </dl>
+              </header>
               {editor}
               <form action="/outpatient/list" method="post">
                 <button name="department" value="{department}">同じ診療科の一覧に戻る</button>
@@ -839,7 +817,19 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             <input type="hidden" name="draft_key" value="{key}">
         """
 
-    def draft_form(self, visit_date, department, visit, body, version, key, message=""):
+    def soap_fields(self, soap, *, editable=False):
+        controls = []
+        for (field, label), value in zip(clinical_notes.SOAP_LABELS.items(), soap):
+            attributes = f'name="{field}" maxlength="{clinical_notes.MAX_SECTION_LENGTH}"' if editable else "readonly"
+            controls.append(f"""
+                <label class="soap-field">{label}
+                  <textarea {attributes} rows="5">
+{escape(value)}</textarea>
+                </label>
+            """)
+        return f'<div class="soap-grid">{"".join(controls)}</div>'
+
+    def draft_form(self, visit_date, department, visit, soap, version, key, message=""):
         fields = self.note_fields(visit_date, department, visit, version, key)
         review_button = ""
         if version:
@@ -854,15 +844,13 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             <p role="status">{escape(message)}</p>
             <form action="/outpatient/draft" method="post" autocomplete="off">
               {fields}
-              <label>下書き本文 <textarea name="body" rows="8" required maxlength="{clinical_notes.MAX_DRAFT_LENGTH}">
-{escape(body)}</textarea></label>
+              {self.soap_fields(soap, editable=True)}
               <button>下書きを保存する</button>
             </form>
             {review_button}
         """
 
     def readonly_note(self, note, heading):
-        origin = "（旧版から移行。初回作成日時の記録がないため旧版の保存日時を表示）" if note.created_at_estimated else ""
         finalized = ""
         if note.finalized_at:
             finalized = f"""
@@ -873,26 +861,25 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             <h3>{heading}</h3>
             <dl>
               <dt>入力者ID</dt><dd>{escape(note.saved_by)}</dd>
-              <dt>作成日時（UTC）</dt><dd>{escape(note.created_at)}{origin}</dd>
+              <dt>作成日時（UTC）</dt><dd>{escape(note.created_at)}</dd>
               {finalized}
             </dl>
-            <label>保存済み本文 <textarea rows="8" readonly>
-{escape(note.body)}</textarea></label>
+            <p>保存済み本文（SOAP）</p>
+            {self.soap_fields(note.soap)}
         """
 
     def current_note_editor(self, connection, visit_date, department, visit, staff_id):
         note = clinical_notes.read_draft(connection, visit[0])
         if note and note.finalized_at:
             return self.finalized_note_editor(connection, visit_date, department, visit, note, staff_id)
-        body, version = (note.body, note.version) if note else ("", 0)
+        soap, version = (note.soap, note.version) if note else (clinical_notes.Soap(), 0)
         key = clinical_notes.draft_key(connection, visit[0], visit[1], version, staff_id)
-        return self.draft_form(visit_date, department, visit, body, version, key)
+        return self.draft_form(visit_date, department, visit, soap, version, key)
 
-    def note_conflict(self, visit_date, department, visit_id, message, submitted_body):
+    def note_conflict(self, visit_date, department, visit_id, message, submitted_soap):
         submitted = ""
-        if submitted_body is not None:
-            submitted = f"""<label>保存されなかった入力 <textarea rows="8" readonly>
-{escape(submitted_body)}</textarea></label>"""
+        if submitted_soap is not None:
+            submitted = f"<h4>保存されなかった入力</h4>{self.soap_fields(submitted_soap)}"
         return f"""
             <p role="alert">{escape(message)}</p>
             {submitted}
@@ -910,23 +897,22 @@ class PrototypeHandler(BaseHTTPRequestHandler):
               <dt>訂正日時（UTC）</dt><dd>{escape(correction.corrected_at)}</dd>
               <dt>訂正理由</dt><dd>{escape(correction.reason)}</dd>
             </dl>
-            <label>訂正後の本文 <textarea rows="8" readonly>
-{escape(correction.body)}</textarea></label>
+            {self.soap_fields(correction.soap)}
         """
 
     def finalized_note_editor(
         self, connection, visit_date, department, visit, note, staff_id,
-        *, corrections=None, submitted_body=None, reason="", message="",
+        *, corrections=None, submitted_soap=None, reason="", message="",
     ):
         visit_id, patient_id, _, _ = visit
         if corrections is None:
             corrections = clinical_notes.read_corrections(connection, visit_id)
 
-        revision, current_body = 0, note.body
+        revision, current_soap = 0, note.soap
         display = self.readonly_note(note, "確定済み診療録")
         if corrections:
             current = corrections[0]
-            revision, current_body = current.revision, current.body
+            revision, current_soap = current.revision, current.soap
             history = "".join(
                 f"<details><summary>訂正第{item.revision}版</summary>{self.corrected_note(item)}</details>"
                 for item in corrections[1:]
@@ -943,56 +929,55 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             connection, visit_id, patient_id, revision, staff_id, action=clinical_notes.CORRECTION_ACTION,
         )
         fields = self.note_fields(visit_date, department, visit, revision, key)
-        body = current_body if submitted_body is None else submitted_body
+        soap = current_soap if submitted_soap is None else submitted_soap
         return display + f"""
             <h3>確定済み診療録の訂正</h3>
             <p role="status">{escape(message)}</p>
             <form action="/outpatient/correct" method="post" autocomplete="off">
               {fields}
-              <label>訂正後の本文 <textarea name="body" rows="8" required maxlength="{clinical_notes.MAX_DRAFT_LENGTH}">
-{escape(body)}</textarea></label>
+              {self.soap_fields(soap, editable=True)}
               <label>訂正理由 <input name="reason" required maxlength="{clinical_notes.MAX_REASON_LENGTH}" value="{escape(reason)}"></label>
               <button>理由を記録して訂正する</button>
             </form>
         """
 
-    def apply_note_correction(self, connection, visit_date, department, visit, note, revision, body, reason, staff_id):
+    def apply_note_correction(self, connection, visit_date, department, visit, note, revision, soap, reason, staff_id):
         visit_id = visit[0]
         if note is None or not note.finalized_at:
             message = "確定済みの診療録だけを訂正できます。"
-            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
+            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, soap)
 
         corrections = clinical_notes.read_corrections(connection, visit_id)
         current_revision = corrections[0].revision if corrections else 0
         if current_revision != revision:
             message = "別の画面で訂正が保存されました。最新の診療録を開いてください。"
-            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
+            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, soap)
         try:
             reason = clinical_notes.validate_reason(reason)
-            body = clinical_notes.validate_body(body)
+            soap = clinical_notes.validate_soap(soap)
         except ValueError as error:
             return HTTPStatus.BAD_REQUEST, self.finalized_note_editor(
                 connection, visit_date, department, visit, note, staff_id,
-                corrections=corrections, submitted_body=body, reason=reason, message=str(error),
+                corrections=corrections, submitted_soap=soap, reason=reason, message=str(error),
             )
-        clinical_notes.append_correction(connection, visit_id, revision + 1, body, reason, staff_id)
+        clinical_notes.append_correction(connection, visit_id, revision + 1, soap, reason, staff_id)
         return HTTPStatus.OK, self.finalized_note_editor(
             connection, visit_date, department, visit, note, staff_id, message="訂正を保存しました。",
         )
 
-    def apply_note_action(self, connection, action, visit_date, department, visit, version, key, body, reason, staff_id):
+    def apply_note_action(self, connection, action, visit_date, department, visit, version, key, soap, reason, staff_id):
         visit_id, patient_id, _, _ = visit
         note = clinical_notes.read_draft(connection, visit_id)
         if action == clinical_notes.CORRECTION_ACTION:
             return self.apply_note_correction(
-                connection, visit_date, department, visit, note, version, body, reason, staff_id,
+                connection, visit_date, department, visit, note, version, soap, reason, staff_id,
             )
         if note and note.finalized_at:
             message = "この診療録は確定済みです。"
-            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
+            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, soap)
         if version != (note.version if note else 0) or (action != clinical_notes.ACTION and note is None):
             message = "下書きの版が変わったか、下書きがまだありません。最新の診療録を開いてください。"
-            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
+            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, soap)
 
         if action == clinical_notes.REVIEW_ACTION:
             final_key = clinical_notes.draft_key(connection, visit_id, patient_id, version, staff_id, action=clinical_notes.FINALIZE_ACTION)
@@ -1013,30 +998,30 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             return HTTPStatus.OK, self.finalized_note_editor(connection, visit_date, department, visit, finalized, staff_id)
 
         try:
-            body = clinical_notes.validate_body(body)
+            soap = clinical_notes.validate_soap(soap)
         except ValueError as error:
-            return HTTPStatus.BAD_REQUEST, self.draft_form(visit_date, department, visit, body, version, key, str(error))
-        if not clinical_notes.save_draft(connection, visit_id, body, version, staff_id):
+            return HTTPStatus.BAD_REQUEST, self.draft_form(visit_date, department, visit, soap, version, key, str(error))
+        if not clinical_notes.save_draft(connection, visit_id, soap, version, staff_id):
             raise sqlite3.IntegrityError("下書きの版を更新できませんでした。")
         next_key = clinical_notes.draft_key(connection, visit_id, patient_id, version + 1, staff_id)
         return HTTPStatus.OK, self.draft_form(
-            visit_date, department, visit, body, version + 1, next_key, "下書きを保存しました。",
+            visit_date, department, visit, soap, version + 1, next_key, "下書きを保存しました。",
         )
 
     def submit_clinical_note(self, action):
         correcting = action == clinical_notes.CORRECTION_ACTION
         saving = correcting or action == clinical_notes.ACTION
         today = date.today().isoformat()
-        body = None
+        soap = None
         reason = ""
         try:
-            fields = self.read_form(max_fields=8, max_bytes=32768, keep_blank_values=True)
+            fields = self.read_form(max_fields=11, max_bytes=110000, keep_blank_values=True)
             expected = {"department", "visit_date", "patient_number", "visit_id", "version", "draft_key"}
             if saving:
-                expected.add("body")
+                expected.update(clinical_notes.SOAP_LABELS)
             if correcting:
                 expected.add("reason")
-            if fields.keys() != expected:
+            if fields.keys() != expected or any(len(value) != 1 for value in fields.values()):
                 raise ValueError
             department, = fields["department"]
             visit_date, = fields["visit_date"]
@@ -1045,7 +1030,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             version_text, = fields["version"]
             key, = fields["draft_key"]
             if saving:
-                body, = fields["body"]
+                soap = clinical_notes.Soap(*(fields[field][0] for field in clinical_notes.SOAP_LABELS))
             if correcting:
                 reason, = fields["reason"]
             visit_id = outpatient.parse_visit_id(visit_text)
@@ -1071,7 +1056,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                     ):
                         confirmed_visit = visit
                         status, editor = self.apply_note_action(
-                            connection, action, today, department, visit, version, key, body, reason, staff[0],
+                            connection, action, today, department, visit, version, key, soap, reason, staff[0],
                         )
 
                 outcome = "denied" if not allowed else "success" if status == HTTPStatus.OK else "failed"
@@ -1117,7 +1102,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             """
         return f"""
             <h3>処方指示</h3>
-            <p>架空の薬剤を入力してください。ここで登録するのは処方指示です。</p>
+            <p>マスター未接続の試作入力です。架空の薬剤で処方指示を確認してください。</p>
             {listing}
             <p role="status">{escape(message)}</p>
             <form action="/outpatient/prescription" method="post" autocomplete="off">
