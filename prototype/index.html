@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DENCAL 試作版</title>
+  <style>
+    body { margin: 0; background: #f2f5f8; color: #18283a; font: 1rem/1.6 system-ui, sans-serif; }
+    main { max-width: 38rem; margin: 3rem auto; padding: 0 1rem; }
+    .notice, section { padding: 1rem 1.25rem; border-radius: 0.5rem; }
+    .notice { background: #fff2cc; color: #573a05; }
+    section { background: #fff; border: 1px solid #d5dee8; }
+    h1 { margin-bottom: 0.5rem; }
+    h2 { margin: 0 0 0.5rem; font-size: 1.2rem; }
+    section p { margin: 0; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>DENCAL 試作版</h1>
+    <p class="notice"><strong>実務利用不可。</strong> 動作確認には架空データのみを使用してください。</p>
+    <section aria-labelledby="database-heading">
+      <h2 id="database-heading">データベースの状態</h2>
+      <p>{{database_status}}</p>
+    </section>
+  </main>
+</body>
+</html>
