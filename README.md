@@ -36,7 +36,7 @@ DBの保存場所は `--db`、ポートは `--port` で変更できます。た�
 別のターミナルで同じディレクトリを開き、次を実行します。Windowsでは `python3` を `py -3` に置き換えます。
 
 ```bash
-python3 prototype/server.py --add-staff demo-a
+python3 prototype/server.py --add-staff demo-a --role reception
 ```
 
 試作用のパスワードを入力します。15文字以上、UTF-8で256バイト以下です。DBに保存するのはソルトとハッシュです。既定の職員やパスワードはありません。起動時に `--db` を指定した場合は、職員の登録・無効化にも同じパスを指定します。
@@ -48,6 +48,25 @@ python3 prototype/server.py --disable-staff demo-a
 ```
 
 この操作後は `demo-a` の再ログインを拒否し、別ブラウザを含む既存セッションも失効します。
+
+### 職種別の操作権限を確認する
+
+登録または職種の割り当てには、次のいずれかの値を指定します。ログイン後は、割り当てられた職種の試作用操作だけがメニューに表示されます。
+
+| `--role` | 職種 | 試作用操作の画面 |
+| --- | --- | --- |
+| `reception` | 受付 | `/trial/reception-preview` |
+| `physician` | 医師 | `/trial/consultation-preview` |
+| `nurse` | 看護師 | `/trial/nursing-preview` |
+| `admin` | 管理者 | `/trial/administration-preview` |
+
+既存の職員にはローカルのターミナルから職種を割り当てます。役割を指定せず登録した職員と、旧DBから移行した職員は「未割当」となり、ログインはできますが試作用操作は利用できません。
+
+```bash
+python3 prototype/server.py --set-staff-role demo-a --role physician
+```
+
+職種の変更は、ログイン中の職員にも次のリクエストから適用されます。各画面の「試行する」は同じ職種の操作APIを呼び、成功すると確認用のJSONを返します。例えば診察の試行は `POST /api/trial/consultation-preview` です。権限のない職種では、画面のURLを直接開く場合も、操作APIを直接呼ぶ場合も HTTP 403 になります。
 
 ## 診療報酬の算定とオンライン資格確認
 

@@ -7,6 +7,7 @@ from html import escape
 from http.cookies import CookieError, SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -18,7 +19,13 @@ import auth
 
 
 HOST = "127.0.0.1"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+TRIAL_OPERATIONS = {
+    "reception-preview": ("reception", "受付の試行"),
+    "consultation-preview": ("physician", "診察の試行"),
+    "nursing-preview": ("nurse", "看護の試行"),
+    "administration-preview": ("admin", "管理の試行"),
+}
 SESSION_COOKIE = "dencal_session"
 COOKIE_OPTIONS = "Path=/; HttpOnly; SameSite=Strict"
 SESSION_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -73,6 +80,9 @@ def initialize_database(path):
         ).fetchone()[0]
         if version == 1:
             auth.initialize_auth(connection)
+            version = 2
+        if version == 2:
+            auth.initialize_staff_roles(connection)
             connection.execute(
                 "UPDATE prototype_metadata SET schema_version = ? WHERE id = 1",
                 (SCHEMA_VERSION,),
@@ -100,18 +110,17 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             self.send_login()
             return
         if self.path != "/":
-            self.send_error(HTTPStatus.NOT_FOUND)
+            prefix, _, operation = self.path.rpartition("/")
+            if prefix == "/trial" and operation in TRIAL_OPERATIONS:
+                self.handle_trial(operation)
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND)
             return
 
-        token = self.session_token()
-        if token is None:
-            self.redirect("/login")
-            return
         try:
-            uri = self.server.database.as_uri() + "?mode=ro"
-            with closing(sqlite3.connect(uri, uri=True)) as connection:
-                staff_id = auth.session_staff(connection, token)
-                if staff_id is None:
+            with closing(self.open_readonly_database()) as connection:
+                staff = self.current_staff(connection)
+                if staff is None:
                     self.redirect("/login")
                     return
                 version, initialized_at = database_metadata(connection)
@@ -119,23 +128,87 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             self.database_error(error)
             return
 
+        staff_id, role = staff
+        role_label = auth.ROLE_LABELS.get(role, "未割当")
+        links = "".join(
+            f'<li><a href="/trial/{name}">{title}</a></li>'
+            for name, (allowed_role, title) in TRIAL_OPERATIONS.items()
+            if allowed_role == role
+        )
+        trial_menu = f"<ul>{links}</ul>" if links else "<p>利用できる試作用操作はありません。</p>"
         self.send_page(HTTPStatus.OK, f"""
             <section aria-labelledby="database-heading">
               <h2 id="database-heading">データベースの状態</h2>
               <p>利用可能（スキーマ版 {version}、初期化日時 {escape(initialized_at)}）</p>
               <p>ログイン中の職員ID　{escape(staff_id)}</p>
+              <p>職種　{role_label}</p>
+              {trial_menu}
               <form action="/logout" method="post"><button>ログアウト</button></form>
+            </section>
+        """)
+
+    def open_readonly_database(self):
+        uri = self.server.database.as_uri() + "?mode=ro"
+        return sqlite3.connect(uri, uri=True)
+
+    def current_staff(self, connection):
+        token = self.session_token()
+        return auth.session_staff(connection, token) if token else None
+
+    def handle_trial(self, operation, *, api=False):
+        required_role, title = TRIAL_OPERATIONS[operation]
+        try:
+            with closing(self.open_readonly_database()) as connection:
+                staff = self.current_staff(connection)
+        except sqlite3.Error as error:
+            self.log_error("職種の読み取りエラー: %s", error)
+            if api:
+                self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "database_unavailable"})
+            else:
+                self.send_page(HTTPStatus.SERVICE_UNAVAILABLE, "<p>データベースを利用できません。</p>")
+            return
+
+        if staff is None:
+            if api:
+                self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "login_required"})
+            else:
+                self.redirect("/login")
+            return
+
+        if staff[1] != required_role:
+            if api:
+                self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+            else:
+                self.send_page(HTTPStatus.FORBIDDEN, "<p>この操作を行う権限がありません。</p>")
+            return
+
+        if api:
+            self.send_json(HTTPStatus.OK, {"operation": operation, "result": "allowed"})
+            return
+
+        self.send_page(HTTPStatus.OK, f"""
+            <section>
+              <h2>{title}</h2>
+              <p>職種別の操作権限を確認できます。</p>
+              <form action="/api/trial/{operation}" method="post"><button>試行する</button></form>
+              <p><a href="/">職員画面に戻る</a></p>
             </section>
         """)
 
     def do_POST(self):
         if not self.is_local_request():
             return
-        if self.path not in ("/login", "/logout"):
+        prefix, _, operation = self.path.rpartition("/")
+        is_trial = prefix == "/api/trial" and operation in TRIAL_OPERATIONS
+        if self.path not in ("/login", "/logout") and not is_trial:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if self.headers.get_all("Origin") != [self.server.origin]:
             self.send_error(HTTPStatus.FORBIDDEN)
+            return
+
+        if is_trial:
+            self.handle_trial(operation, api=True)
             return
 
         try:
@@ -222,9 +295,15 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def send_page(self, status, content):
-        payload = self.server.page.replace("{{content}}", content).encode("utf-8")
+        self.send_content(status, self.server.page.replace("{{content}}", content), "text/html")
+
+    def send_json(self, status, content):
+        self.send_content(status, json.dumps(content), "application/json")
+
+    def send_content(self, status, content, content_type):
+        payload = content.encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -238,7 +317,13 @@ def main():
     staff_commands = parser.add_mutually_exclusive_group()
     staff_commands.add_argument("--add-staff", metavar="ID", help="架空の職員を登録する")
     staff_commands.add_argument("--disable-staff", metavar="ID", help="職員を無効化して全セッションを失効する")
+    staff_commands.add_argument("--set-staff-role", metavar="ID", help="既存の職員に職種を割り当てる")
+    parser.add_argument("--role", choices=auth.ROLE_LABELS, help="職員の登録・職種割当に使う職種")
     args = parser.parse_args()
+    if args.set_staff_role is not None and args.role is None:
+        parser.error("--set-staff-role には --role が必要です。")
+    if args.role is not None and args.add_staff is None and args.set_staff_role is None:
+        parser.error("--role は --add-staff または --set-staff-role と併用してください。")
     if not 0 <= args.port <= 65535:
         parser.error("--port は 0〜65535 を指定してください。")
 
@@ -248,11 +333,14 @@ def main():
     except (OSError, RuntimeError, sqlite3.Error, ValueError) as error:
         parser.exit(1, f"データベース初期化エラー（{args.db}）: {error}\n")
 
-    if args.add_staff is not None or args.disable_staff is not None:
+    if any(value is not None for value in (args.add_staff, args.disable_staff, args.set_staff_role)):
         try:
             if args.add_staff is not None:
-                auth.add_staff(database, args.add_staff)
+                auth.add_staff(database, args.add_staff, args.role)
                 print("架空の職員を登録しました。")
+            elif args.set_staff_role is not None:
+                auth.set_staff_role(database, args.set_staff_role, args.role)
+                print("職員の職種を設定しました。")
             else:
                 auth.disable_staff(database, args.disable_staff)
                 print("職員を無効化し、セッションを失効しました。")
