@@ -72,7 +72,7 @@ export const ReceptionBillingView: React.FC<ReceptionBillingViewProps> = ({
   }, [selectedPatient]);
 
   const canSettleBilling =
-    canPerformAction(currentStaff.role, 'settle_billing') || currentStaff.role === 'doctor';
+    canPerformAction(currentStaff.role, 'settle_billing');
 
   const handleSettleClick = () => {
     if (!selectedPatient) return;

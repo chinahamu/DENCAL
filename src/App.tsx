@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react';
-import { Lock, ShieldCheck } from 'lucide-react';
 import {
   AllergyItem,
   AuditLogEntry,
@@ -17,7 +16,6 @@ import {
   INITIAL_AUDIT_LOGS,
   INITIAL_BACKUPS,
   INITIAL_PATIENTS,
-  STAFF_MEMBERS,
 } from './data/seedData';
 import { computePayloadChecksum, computeRecordHash } from './utils/emrLogic';
 import { ClinicalWorkbench } from './components/ClinicalWorkbench';
@@ -25,29 +23,115 @@ import { ReceptionBillingView } from './components/ReceptionBillingView';
 import { BackupPreservationView } from './components/BackupPreservationView';
 import { SecurityComplianceView } from './components/SecurityComplianceView';
 import { NewPatientModal } from './components/NewPatientModal';
+import { StaffLogin } from './components/StaffLogin';
+import { canPerformAction, type EmrAction } from './utils/permissions';
 
 type MainNavView = 'workbench' | 'reception_billing' | 'backup_dr' | 'security_audit';
 
 export default function App() {
+  const [staff, setStaff] = useState<StaffMember | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [ending, setEnding] = useState(false);
+  const [sessionError, setSessionError] = useState('');
+
+  useEffect(() => {
+    if (ending) return;
+    let active = true;
+    let checking = false;
+    async function checkSession() {
+      if (checking) return;
+      checking = true;
+      try {
+        const response = await fetch('/api/session');
+        const next = response.ok ? (await response.json()).staff as StaffMember : null;
+        if (!active) return;
+        setStaff(next);
+        setSessionError(response.ok || response.status === 401 ? '' : 'DBの初期化と起動状態を確認してください。');
+      } catch {
+        if (!active) return;
+        setStaff(null);
+        setSessionError('認証サーバーに接続できません。');
+      } finally {
+        checking = false;
+        if (active) setLoading(false);
+      }
+    }
+    void checkSession();
+    const timer = window.setInterval(checkSession, 30_000);
+    window.addEventListener('focus', checkSession);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', checkSession);
+    };
+  }, [ending, staff?.id]);
+
+  async function logout() {
+    setEnding(true);
+    setStaff(null);
+    setSessionError('');
+    try {
+      const response = await fetch('/api/logout', { method: 'POST' });
+      if (!response.ok) throw new Error('Logout failed');
+      setEnding(false);
+    } catch {
+      setSessionError('ログアウトを確認できません。通信状態を確認して再試行してください。');
+    }
+  }
+
+  async function authorize(action: EmrAction) {
+    try {
+      const response = await fetch('/api/access/' + action);
+      if (response.status === 401) setStaff(null);
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  if (ending) return (
+    <main className="p-6">
+      <p role="status">{sessionError || 'セッションを終了しています…'}</p>
+      {sessionError && <button className="mt-3 underline" onClick={logout}>ログアウトを再試行</button>}
+    </main>
+  );
+  if (loading) return <p role="status" className="p-6">ログイン状態を確認しています…</p>;
+  if (!staff) return <StaffLogin onLogin={setStaff} sessionError={sessionError} />;
+  return <Workspace key={staff.id + ':' + staff.role} currentStaff={staff} onLogout={logout} authorize={authorize} />;
+}
+
+interface WorkspaceProps {
+  currentStaff: StaffMember;
+  onLogout: () => void;
+  authorize: (action: EmrAction) => Promise<boolean>;
+}
+
+function Workspace({ currentStaff, onLogout, authorize }: WorkspaceProps) {
   const [activeView, setActiveView] = useState<MainNavView>('workbench');
   const [patients, setPatients] = useState<PatientRecord[]>(INITIAL_PATIENTS);
   const [backups, setBackups] = useState<BackupSnapshot[]>(INITIAL_BACKUPS);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(INITIAL_AUDIT_LOGS);
 
   const [selectedPatientId, setSelectedPatientId] = useState<string>(INITIAL_PATIENTS[0].id);
-  const [currentStaff, setCurrentStaff] = useState<StaffMember>(STAFF_MEMBERS[0]);
-  const [isNewPatientModalOpen, setIsNewPatientModalOpen] = useState<boolean>(false);
-  const [isScreenLocked, setIsScreenLocked] = useState<boolean>(false);
-  const [autoLockMinutes, setAutoLockMinutes] = useState<number>(5);
-  const [unlockPin, setUnlockPin] = useState('');
+  const [isNewPatientModalOpen, setIsNewPatientModalOpen] = useState(false);
+  const [accessMessage, setAccessMessage] = useState('');
+  const can = (action: EmrAction) => canPerformAction(currentStaff.role, action);
+
+  async function openAdminView(view: 'backup_dr' | 'security_audit', action: EmrAction) {
+    setAccessMessage('');
+    if (await authorize(action)) {
+      setActiveView(view);
+    } else {
+      setAccessMessage('この画面を開けません。職種の権限と接続状態を確認してください。');
+    }
+  }
 
   const appendAuditLog = (
     actionType: AuditLogEntry['actionType'],
     summary: string,
-    targetPatient?: { id: string; name: string },
-    overrideActor?: StaffMember
+    targetPatient?: { id: string; name: string }
   ) => {
-    const actor = overrideActor || currentStaff;
+    const actor = currentStaff;
     const now = new Date();
     const ts = `2026-11-09 ${now.toTimeString().slice(0, 8)}`;
     const integrityHash = computePayloadChecksum(
@@ -89,6 +173,7 @@ export default function App() {
   };
 
   const handleUpdateSoap = (patientId: string, soap: SoapContent) => {
+    if (!can('edit_soap')) return;
     setPatients((prev) =>
       prev.map((p) =>
         p.id === patientId
@@ -103,6 +188,7 @@ export default function App() {
   };
 
   const handleAddPrescription = (patientId: string, item: PrescriptionItem) => {
+    if (!can('add_prescription')) return;
     const pt = patients.find((p) => p.id === patientId);
     setPatients((prev) =>
       prev.map((p) =>
@@ -125,6 +211,7 @@ export default function App() {
   };
 
   const handleRemovePrescription = (patientId: string, prescriptionId: string) => {
+    if (!can('add_prescription')) return;
     setPatients((prev) =>
       prev.map((p) =>
         p.id === patientId
@@ -141,6 +228,7 @@ export default function App() {
   };
 
   const handleToggleLabOrder = (patientId: string, labOrder: LabOrderItem) => {
+    if (!can('add_prescription')) return;
     setPatients((prev) =>
       prev.map((p) => {
         if (p.id !== patientId) return p;
@@ -158,9 +246,10 @@ export default function App() {
   };
 
   const handleSignAndFinalizeChart = (patientId: string, revisionReason: string) => {
+    if (!can('sign_soap')) return;
     const now = new Date();
     const ts = `2026-11-09 ${now.toTimeString().slice(0, 8)}`;
-    const hpkiId = currentStaff.hpkiCertId || 'HPKI-JP-MED-2026-884102';
+    const hpkiId = currentStaff.hpkiCertId || 'DEMO-SIGNATURE';
 
     setPatients((prev) =>
       prev.map((p) => {
@@ -216,6 +305,7 @@ export default function App() {
   };
 
   const handleAddVitalSign = (patientId: string, vital: VitalRecord) => {
+    if (!can('record_vitals')) return;
     setPatients((prev) =>
       prev.map((p) =>
         p.id === patientId
@@ -229,6 +319,7 @@ export default function App() {
   };
 
   const handleAddAllergy = (patientId: string, allergy: AllergyItem) => {
+    if (!can('record_vitals')) return;
     setPatients((prev) =>
       prev.map((p) =>
         p.id === patientId
@@ -242,6 +333,7 @@ export default function App() {
   };
 
   const handleRegisterNewPatient = (newPatient: PatientRecord) => {
+    if (!can('register_patient')) return;
     setPatients((prev) => [newPatient, ...prev]);
     setSelectedPatientId(newPatient.id);
     appendAuditLog(
@@ -252,6 +344,7 @@ export default function App() {
   };
 
   const handleCompleteBilling = (patientId: string) => {
+    if (!can('settle_billing')) return;
     const now = new Date();
     const ts = `2026-11-09 ${now.toTimeString().slice(0, 8)}`;
     setPatients((prev) =>
@@ -279,6 +372,7 @@ export default function App() {
   const handleCreateSnapshot = (
     tier: '院内プライマリRAID10' | '院内隔離NAS (WORM不変)' | 'オフライン暗号化アーカイブ'
   ) => {
+    if (!can('create_backup')) return;
     const now = new Date();
     const ts = `2026-11-09 ${now.toTimeString().slice(0, 8)}`;
     const payload = JSON.stringify({
@@ -315,6 +409,7 @@ export default function App() {
   };
 
   const handleVerifySnapshot = (backupId: string) => {
+    if (!can('create_backup')) return;
     const now = new Date();
     const ts = `2026-11-09 ${now.toTimeString().slice(0, 8)}`;
     setBackups((prev) =>
@@ -335,6 +430,7 @@ export default function App() {
   };
 
   const handleRestoreSnapshot = (backupId: string) => {
+    if (!can('restore_backup')) return;
     appendAuditLog(
       'BACKUP_RESTORE',
       `バックアップ世代 ${backupId} からのポイントインタイム・リストア検証を実行`
@@ -342,6 +438,7 @@ export default function App() {
   };
 
   const handleExportJsonArchive = () => {
+    if (!can('create_backup')) return;
     const exportPayload = {
       exportedAt: new Date().toISOString(),
       clinic: CLINIC_INFO,
@@ -360,16 +457,6 @@ export default function App() {
     appendAuditLog(
       'DOCUMENT_EXPORT',
       `院内全カルテデータの標準JSONアーカイブ出力を実行`
-    );
-  };
-
-  const handleSwitchStaff = (staff: StaffMember) => {
-    setCurrentStaff(staff);
-    appendAuditLog(
-      'ROLE_SWITCH',
-      `操作セッション職種切替：${staff.name} (${staff.roleLabel}) として認証完了`,
-      undefined,
-      staff
     );
   };
 
@@ -422,49 +509,53 @@ export default function App() {
           >
             受付・会計算定
           </a>
-          <a
-            href="#backup_dr"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('backup_dr');
-            }}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 ${
-              activeView === 'backup_dr'
-                ? 'text-teal-800 font-bold underline underline-offset-8 decoration-2 decoration-teal-700'
-                : 'hover:text-slate-900'
-            }`}
-          >
-            バックアップ・保存性
-          </a>
-          <a
-            href="#security_audit"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveView('security_audit');
-            }}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 ${
-              activeView === 'security_audit'
-                ? 'text-teal-800 font-bold underline underline-offset-8 decoration-2 decoration-teal-700'
-                : 'hover:text-slate-900'
-            }`}
-          >
-            安全管理・監査証跡
-          </a>
+          {can('create_backup') && (
+            <a
+              href="#backup_dr"
+              onClick={(e) => {
+                e.preventDefault();
+                void openAdminView('backup_dr', 'create_backup');
+              }}
+              className={`py-1 transition-colors whitespace-nowrap shrink-0 ${
+                activeView === 'backup_dr'
+                  ? 'text-teal-800 font-bold underline underline-offset-8 decoration-2 decoration-teal-700'
+                  : 'hover:text-slate-900'
+              }`}
+            >
+              バックアップ・保存性
+            </a>
+          )}
+          {can('view_audit') && (
+            <a
+              href="#security_audit"
+              onClick={(e) => {
+                e.preventDefault();
+                void openAdminView('security_audit', 'view_audit');
+              }}
+              className={`py-1 transition-colors whitespace-nowrap shrink-0 ${
+                activeView === 'security_audit'
+                  ? 'text-teal-800 font-bold underline underline-offset-8 decoration-2 decoration-teal-700'
+                  : 'hover:text-slate-900'
+              }`}
+            >
+              安全管理・監査証跡
+            </a>
+          )}
         </nav>
 
         {/* Zone 3: 1 primary action */}
         <div className="flex items-center gap-3 shrink-0">
           <button
             type="button"
-            onClick={() => setIsScreenLocked(true)}
+            onClick={onLogout}
             className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
           >
-            離席ロック ({currentStaff.name})
+            ログアウト・離席 ({currentStaff.name})
           </button>
         </div>
       </header>
 
-      {/* Sub-header Clinic Context & Role Switcher Strip */}
+      {/* Sub-header Clinic Context & Staff */}
       <div className="bg-slate-100/90 border-b border-slate-200 px-6 py-2 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
         <div className="flex flex-wrap items-center gap-2 tabular-nums">
           <span className="font-semibold text-slate-800">{CLINIC_INFO.name}</span>
@@ -478,30 +569,12 @@ export default function App() {
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          <label htmlFor="quick-role-select" className="text-slate-600 font-medium">
-            デモ職種切替：
-          </label>
-          <select
-            id="quick-role-select"
-            value={currentStaff.id}
-            onChange={(e) => {
-              const found = STAFF_MEMBERS.find((s) => s.id === e.target.value);
-              if (found) handleSwitchStaff(found);
-            }}
-            className="px-2.5 py-1 text-xs bg-white border border-slate-300 rounded font-medium text-slate-900"
-          >
-            {STAFF_MEMBERS.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name} — {s.roleLabel}
-              </option>
-            ))}
-          </select>
-        </div>
+        <p>ログイン中　{currentStaff.name}（{currentStaff.roleLabel}）</p>
       </div>
 
       {/* Main Content Workspace */}
       <main className="flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-5">
+        {accessMessage && <p role="alert" className="mb-4 text-sm text-red-700">{accessMessage}</p>}
         {activeView === 'workbench' && (
           <ClinicalWorkbench
             patients={patients}
@@ -542,7 +615,7 @@ export default function App() {
           />
         )}
 
-        {activeView === 'backup_dr' && (
+        {activeView === 'backup_dr' && can('create_backup') && (
           <BackupPreservationView
             backups={backups}
             patients={patients}
@@ -554,14 +627,11 @@ export default function App() {
           />
         )}
 
-        {activeView === 'security_audit' && (
+        {activeView === 'security_audit' && can('view_audit') && (
           <SecurityComplianceView
             currentStaff={currentStaff}
             auditLogs={auditLogs}
-            autoLockMinutes={autoLockMinutes}
-            onSwitchStaff={handleSwitchStaff}
-            onChangeAutoLockMinutes={setAutoLockMinutes}
-            onTriggerLockScreen={() => setIsScreenLocked(true)}
+            onTriggerLockScreen={onLogout}
           />
         )}
       </main>
@@ -584,68 +654,6 @@ export default function App() {
         onRegisterPatient={handleRegisterNewPatient}
       />
 
-      {/* Clear-Screen Session Lock Modal (物理的・技術的安全管理措置) */}
-      {isScreenLocked && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="lock-screen-title"
-          className="fixed inset-0 z-50 bg-slate-900/95 backdrop-blur-xs flex items-center justify-center p-4"
-        >
-          <div className="bg-white border border-slate-200 rounded-lg max-w-md w-full p-6 space-y-4 text-center">
-            <div className="w-10 h-10 rounded-full bg-teal-50 border border-teal-200 text-teal-800 flex items-center justify-center mx-auto">
-              <Lock className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 id="lock-screen-title" className="text-base font-bold text-slate-900">
-                離席時クリアスクリーン保護（画面ロック中）
-              </h2>
-              <p className="text-xs text-slate-500 mt-1">
-                離席時の画面遷移を確認するデモです。職員認証とは連携していません。
-              </p>
-            </div>
-
-            <div className="p-3 bg-slate-50 border border-slate-200 rounded text-xs text-left space-y-1">
-              <div>
-                <span className="text-slate-500">ロック中職員：</span>
-                <span className="font-semibold text-slate-900">
-                  {currentStaff.name} ({currentStaff.roleLabel})
-                </span>
-              </div>
-              <div className="font-mono text-[11px] text-slate-500">
-                画面操作確認用のデモPIN　2026
-              </div>
-            </div>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (unlockPin === '2026') {
-                  setUnlockPin('');
-                  setIsScreenLocked(false);
-                }
-              }}
-              className="space-y-3"
-            >
-              <input
-                type="password"
-                aria-label="ロック解除PINコード"
-                value={unlockPin}
-                onChange={(e) => setUnlockPin(e.target.value)}
-                placeholder="PINコードを入力..."
-                className="w-full px-3 py-2 text-center font-mono text-sm bg-white border border-slate-300 rounded-md"
-              />
-              <button
-                type="submit"
-                className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg flex items-center justify-center gap-1.5"
-              >
-                <ShieldCheck className="w-4 h-4" />
-                デモ画面のロック解除
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

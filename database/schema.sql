@@ -16,6 +16,19 @@ CREATE TABLE staff (
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
 );
 
+CREATE TABLE staff_credentials (
+    staff_id INTEGER PRIMARY KEY REFERENCES staff(id) ON DELETE CASCADE,
+    salt BLOB NOT NULL CHECK (length(salt) = 16),
+    password_hash BLOB NOT NULL CHECK (length(password_hash) = 32)
+);
+
+CREATE TABLE staff_sessions (
+    token_hash TEXT PRIMARY KEY NOT NULL CHECK (length(token_hash) = 64),
+    staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX staff_sessions_expiry_idx ON staff_sessions(expires_at);
+
 CREATE TABLE patients (
     id INTEGER PRIMARY KEY,
     patient_number TEXT NOT NULL UNIQUE,
@@ -338,5 +351,5 @@ CREATE TABLE audit_events (
 );
 CREATE INDEX audit_events_time_idx ON audit_events(occurred_at, id);
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 COMMIT;

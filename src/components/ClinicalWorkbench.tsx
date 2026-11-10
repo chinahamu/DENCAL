@@ -269,7 +269,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
 
   const handleSaveAllergy = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedPatient || !newAllergySubstance.trim()) return;
+    if (!selectedPatient || !canRecordVitals || !newAllergySubstance.trim()) return;
     onAddAllergy(selectedPatient.id, {
       substance: newAllergySubstance.trim(),
       category: 'drug',
@@ -636,13 +636,15 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                   ))
                 )}
               </div>
-              <button
-                type="button"
-                onClick={() => setShowAllergyForm(!showAllergyForm)}
-                className="text-xs font-semibold text-teal-800 hover:underline whitespace-nowrap shrink-0"
-              >
-                {showAllergyForm ? '閉じる' : '+ アレルギー追加'}
-              </button>
+              {canRecordVitals && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllergyForm(!showAllergyForm)}
+                  className="text-xs font-semibold text-teal-800 hover:underline whitespace-nowrap shrink-0"
+                >
+                  {showAllergyForm ? '閉じる' : '+ アレルギー追加'}
+                </button>
+              )}
             </div>
           </div>
 

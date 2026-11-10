@@ -6,7 +6,6 @@ import {
   Lock,
   Search,
   ShieldCheck,
-  UserCheck,
 } from 'lucide-react';
 import {
   AuditLogEntry,
@@ -14,15 +13,12 @@ import {
   StaffMember,
   UserRole,
 } from '../types/emr';
-import { CLINIC_INFO, MHLW_COMPLIANCE_ITEMS, STAFF_MEMBERS } from '../data/seedData';
+import { CLINIC_INFO, MHLW_COMPLIANCE_ITEMS } from '../data/seedData';
 import { canPerformAction, EmrAction } from '../utils/emrLogic';
 
 interface SecurityComplianceViewProps {
   currentStaff: StaffMember;
   auditLogs: AuditLogEntry[];
-  autoLockMinutes: number;
-  onSwitchStaff: (staff: StaffMember) => void;
-  onChangeAutoLockMinutes: (minutes: number) => void;
   onTriggerLockScreen: () => void;
 }
 
@@ -36,14 +32,12 @@ const PERMISSION_ROWS: { action: EmrAction; label: string }[] = [
   { action: 'settle_billing', label: '診療報酬算定確定・領収書/明細書発行' },
   { action: 'create_backup', label: '暗号化バックアップ作成・整合性検証（保存性）' },
   { action: 'restore_backup', label: 'バックアップ世代からのシステム復元操作' },
+  { action: 'view_audit', label: '安全管理画面・監査証跡の閲覧' },
 ];
 
 export const SecurityComplianceView: React.FC<SecurityComplianceViewProps> = ({
   currentStaff,
   auditLogs,
-  autoLockMinutes,
-  onSwitchStaff,
-  onChangeAutoLockMinutes,
   onTriggerLockScreen,
 }) => {
   const [auditSearch, setAuditSearch] = useState('');
@@ -116,73 +110,19 @@ export const SecurityComplianceView: React.FC<SecurityComplianceViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1.5 text-xs text-slate-700">
-              <label htmlFor="autolock-select" className="font-medium">
-                離席自動ロック：
-              </label>
-              <select
-                id="autolock-select"
-                value={autoLockMinutes}
-                onChange={(e) => onChangeAutoLockMinutes(Number(e.target.value))}
-                className="px-2 py-1 text-xs bg-slate-50 border border-slate-300 rounded font-mono tabular-nums"
-              >
-                <option value={3}>3分無操作時</option>
-                <option value={5}>5分無操作時</option>
-                <option value={10}>10分無操作時</option>
-              </select>
-            </div>
+            <p className="text-xs text-slate-700">セッションの有効期間はログインから30分です。</p>
             <button
               type="button"
               onClick={onTriggerLockScreen}
               className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap"
             >
               <Lock className="w-3.5 h-3.5" />
-              今すぐ画面ロック (クリアスクリーン)
+              ログアウトして離席する
             </button>
           </div>
         </div>
 
-        {/* Interactive Staff & RBAC Role Switcher */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-              <UserCheck className="w-4 h-4 text-teal-700" />
-              職種別アクセス制御（RBAC）ログイン切替シミュレータ
-            </h3>
-            <span className="text-xs text-slate-500">
-              職種を切り替えると、カルテ確定署名や会計操作などの権限が即座に切り替わります
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-            {STAFF_MEMBERS.map((staff) => {
-              const isCurrent = staff.id === currentStaff.id;
-              return (
-                <button
-                  key={staff.id}
-                  type="button"
-                  onClick={() => onSwitchStaff(staff)}
-                  className={`p-3 rounded-md border text-left transition-colors ${
-                    isCurrent
-                      ? 'bg-teal-50/80 border-teal-700 text-slate-900'
-                      : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-white'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-bold text-slate-900">{staff.name}</span>
-                    <span className="text-[11px] font-semibold text-teal-800">
-                      {isCurrent ? '現在ログイン中' : '切替'}
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-600 mt-0.5">{staff.roleLabel}</div>
-                  <div className="text-[11px] font-mono text-slate-500 tabular-nums mt-1">
-                    {staff.hpkiCertId ? `HPKI: ${staff.hpkiCertId}` : `ID: ${staff.id} · 2FA有効`}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        <p className="text-xs text-slate-700">ログイン中　{currentStaff.name}（{currentStaff.roleLabel}）</p>
       </div>
 
       {/* MHLW Guideline v6.0 3 Principles + Security Measures Checklist & RBAC Matrix */}

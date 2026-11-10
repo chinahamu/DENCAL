@@ -5,7 +5,6 @@ import {
   LabOrderItem,
   MhlwComplianceItem,
   PatientRecord,
-  StaffMember,
 } from '../types/emr';
 import { computePayloadChecksum, computeRecordHash } from '../utils/emrLogic';
 
@@ -19,42 +18,6 @@ export const CLINIC_INFO = {
   serverNode: 'INHOUSE-SRV-01 (192.168.10.10 / 院内閉域VLAN・RAID10)',
   guidelineVersion: '厚生労働省「医療情報システムの安全管理に関するガイドライン 第6.0版」準拠',
 };
-
-export const STAFF_MEMBERS: StaffMember[] = [
-  {
-    id: 'STF-DR-01',
-    name: '榊原 誠一',
-    role: 'doctor',
-    roleLabel: '医師（院長）',
-    department: '総合内科・循環器内科',
-    hpkiCertId: 'HPKI-JP-MED-2026-884102',
-    twoFactorEnabled: true,
-  },
-  {
-    id: 'STF-NS-02',
-    name: '長谷川 美咲',
-    role: 'nurse',
-    roleLabel: '看護師（主任）',
-    department: '外来処置・採血室',
-    twoFactorEnabled: true,
-  },
-  {
-    id: 'STF-CL-03',
-    name: '田辺 裕子',
-    role: 'clerk',
-    roleLabel: '医療事務（レセプト主任）',
-    department: '医事課・受付会計',
-    twoFactorEnabled: true,
-  },
-  {
-    id: 'STF-AD-04',
-    name: '高橋 健太',
-    role: 'admin',
-    roleLabel: '医療情報システム管理者',
-    department: '情報セキュリティ管理室',
-    twoFactorEnabled: true,
-  },
-];
 
 export const DRUG_CATALOG: DrugCatalogItem[] = [
   {

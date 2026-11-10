@@ -7,7 +7,6 @@ import {
   PatientRecord,
   PrescriptionItem,
   SoapContent,
-  UserRole,
 } from '../types/emr';
 
 /**
@@ -256,35 +255,7 @@ export function calculateMedicalFeePoints(
   };
 }
 
-/**
- * Role-based access control (RBAC) enforcement aligned with MHLW Guideline v6.0 Section 14 (認証・認可及びアクセス管理).
- */
-export type EmrAction =
-  | 'view_chart'
-  | 'edit_soap'
-  | 'sign_soap'
-  | 'add_prescription'
-  | 'record_vitals'
-  | 'register_patient'
-  | 'settle_billing'
-  | 'create_backup'
-  | 'restore_backup';
-
-export function canPerformAction(role: UserRole, action: EmrAction): boolean {
-  const rank: Record<UserRole, number> = { clerk: 1, nurse: 2, doctor: 3, admin: 4 };
-  const minimum: Record<EmrAction, UserRole> = {
-    view_chart: 'clerk',
-    register_patient: 'clerk',
-    settle_billing: 'clerk',
-    record_vitals: 'nurse',
-    edit_soap: 'doctor',
-    sign_soap: 'doctor',
-    add_prescription: 'doctor',
-    create_backup: 'admin',
-    restore_backup: 'admin',
-  };
-  return rank[role] >= rank[minimum[action]];
-}
+export { canPerformAction, type EmrAction } from './permissions';
 
 /**
  * Verifies backup snapshot payload integrity against its recorded SHA-256 style checksum.
