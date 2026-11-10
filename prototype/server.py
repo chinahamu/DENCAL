@@ -25,11 +25,12 @@ import patients
 
 
 HOST = "127.0.0.1"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 CLINICAL_NOTE_ACTIONS = {
     "/outpatient/draft": clinical_notes.ACTION,
     "/outpatient/draft-review": clinical_notes.REVIEW_ACTION,
     "/outpatient/finalize": clinical_notes.FINALIZE_ACTION,
+    "/outpatient/correct": clinical_notes.CORRECTION_ACTION,
 }
 PATIENT_REGISTRATION_ROLE = "reception"
 PATIENT_SEARCH_ROLE = "reception"
@@ -114,6 +115,9 @@ def initialize_database(path):
             version = 7
         if version == 7:
             clinical_notes.initialize_finalization(connection)
+            version = 8
+        if version == 8:
+            clinical_notes.initialize_corrections(connection)
             connection.execute(
                 "UPDATE prototype_metadata SET schema_version = ? WHERE id = 1",
                 (SCHEMA_VERSION,),
@@ -874,7 +878,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
     def current_note_editor(self, connection, visit_date, department, visit, staff_id):
         note = clinical_notes.read_draft(connection, visit[0])
         if note and note.finalized_at:
-            return self.readonly_note(note, "確定済み診療録")
+            return self.finalized_note_editor(connection, visit_date, department, visit, note, staff_id)
         body, version = (note.body, note.version) if note else ("", 0)
         key = clinical_notes.draft_key(connection, visit[0], visit[1], version, staff_id)
         return self.draft_form(visit_date, department, visit, body, version, key)
@@ -894,9 +898,90 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             </form>
         """
 
-    def apply_note_action(self, connection, action, visit_date, department, visit, version, key, body, staff_id):
+    def corrected_note(self, correction):
+        return f"""
+            <dl>
+              <dt>訂正者ID</dt><dd>{escape(correction.corrected_by)}</dd>
+              <dt>訂正日時（UTC）</dt><dd>{escape(correction.corrected_at)}</dd>
+              <dt>訂正理由</dt><dd>{escape(correction.reason)}</dd>
+            </dl>
+            <label>訂正後の本文 <textarea rows="8" readonly>
+{escape(correction.body)}</textarea></label>
+        """
+
+    def finalized_note_editor(
+        self, connection, visit_date, department, visit, note, staff_id,
+        *, corrections=None, submitted_body=None, reason="", message="",
+    ):
+        visit_id, patient_id, _, _ = visit
+        if corrections is None:
+            corrections = clinical_notes.read_corrections(connection, visit_id)
+
+        revision, current_body = 0, note.body
+        display = self.readonly_note(note, "確定済み診療録")
+        if corrections:
+            current = corrections[0]
+            revision, current_body = current.revision, current.body
+            history = "".join(
+                f"<details><summary>訂正第{item.revision}版</summary>{self.corrected_note(item)}</details>"
+                for item in corrections[1:]
+            )
+            display = f"""
+                <h3>確定済み診療録（現行・訂正第{revision}版）</h3>
+                {self.corrected_note(current)}
+                <h3>訂正履歴</h3>
+                {history}
+                <details><summary>確定時の元版</summary>{display}</details>
+            """
+
+        key = clinical_notes.draft_key(
+            connection, visit_id, patient_id, revision, staff_id, action=clinical_notes.CORRECTION_ACTION,
+        )
+        fields = self.note_fields(visit_date, department, visit, revision, key)
+        body = current_body if submitted_body is None else submitted_body
+        return display + f"""
+            <h3>確定済み診療録の訂正</h3>
+            <p role="status">{escape(message)}</p>
+            <form action="/outpatient/correct" method="post" autocomplete="off">
+              {fields}
+              <label>訂正後の本文 <textarea name="body" rows="8" required maxlength="{clinical_notes.MAX_DRAFT_LENGTH}">
+{escape(body)}</textarea></label>
+              <label>訂正理由 <input name="reason" required maxlength="{clinical_notes.MAX_REASON_LENGTH}" value="{escape(reason)}"></label>
+              <button>理由を記録して訂正する</button>
+            </form>
+        """
+
+    def apply_note_correction(self, connection, visit_date, department, visit, note, revision, body, reason, staff_id):
+        visit_id = visit[0]
+        if note is None or not note.finalized_at:
+            message = "確定済みの診療録だけを訂正できます。"
+            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
+
+        corrections = clinical_notes.read_corrections(connection, visit_id)
+        current_revision = corrections[0].revision if corrections else 0
+        if current_revision != revision:
+            message = "別の画面で訂正が保存されました。最新の診療録を開いてください。"
+            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
+        try:
+            reason = clinical_notes.validate_reason(reason)
+            body = clinical_notes.validate_body(body)
+        except ValueError as error:
+            return HTTPStatus.BAD_REQUEST, self.finalized_note_editor(
+                connection, visit_date, department, visit, note, staff_id,
+                corrections=corrections, submitted_body=body, reason=reason, message=str(error),
+            )
+        clinical_notes.append_correction(connection, visit_id, revision + 1, body, reason, staff_id)
+        return HTTPStatus.OK, self.finalized_note_editor(
+            connection, visit_date, department, visit, note, staff_id, message="訂正を保存しました。",
+        )
+
+    def apply_note_action(self, connection, action, visit_date, department, visit, version, key, body, reason, staff_id):
         visit_id, patient_id, _, _ = visit
         note = clinical_notes.read_draft(connection, visit_id)
+        if action == clinical_notes.CORRECTION_ACTION:
+            return self.apply_note_correction(
+                connection, visit_date, department, visit, note, version, body, reason, staff_id,
+            )
         if note and note.finalized_at:
             message = "この診療録は確定済みです。"
             return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
@@ -905,7 +990,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
 
         if action == clinical_notes.REVIEW_ACTION:
-            final_key = clinical_notes.draft_key(connection, visit_id, patient_id, version, staff_id, finalize=True)
+            final_key = clinical_notes.draft_key(connection, visit_id, patient_id, version, staff_id, action=clinical_notes.FINALIZE_ACTION)
             fields = self.note_fields(visit_date, department, visit, version, final_key)
             editor = self.readonly_note(note, "診療録の確定前確認") + f"""
                 <p>保存済みの本文を確認してください。確定後は通常の編集画面から変更できません。</p>
@@ -920,7 +1005,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             if not clinical_notes.finalize_draft(connection, visit_id, version, staff_id):
                 raise sqlite3.IntegrityError("確定対象の版を更新できませんでした。")
             finalized = clinical_notes.read_draft(connection, visit_id)
-            return HTTPStatus.OK, self.readonly_note(finalized, "確定済み診療録")
+            return HTTPStatus.OK, self.finalized_note_editor(connection, visit_date, department, visit, finalized, staff_id)
 
         try:
             body = clinical_notes.validate_body(body)
@@ -934,14 +1019,18 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         )
 
     def submit_clinical_note(self, action):
-        saving = action == clinical_notes.ACTION
+        correcting = action == clinical_notes.CORRECTION_ACTION
+        saving = correcting or action == clinical_notes.ACTION
         today = date.today().isoformat()
         body = None
+        reason = ""
         try:
-            fields = self.read_form(max_fields=7, max_bytes=32768, keep_blank_values=True)
+            fields = self.read_form(max_fields=8, max_bytes=32768, keep_blank_values=True)
             expected = {"department", "visit_date", "patient_number", "visit_id", "version", "draft_key"}
             if saving:
                 expected.add("body")
+            if correcting:
+                expected.add("reason")
             if fields.keys() != expected:
                 raise ValueError
             department, = fields["department"]
@@ -952,6 +1041,8 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             key, = fields["draft_key"]
             if saving:
                 body, = fields["body"]
+            if correcting:
+                reason, = fields["reason"]
             visit_id = outpatient.parse_visit_id(visit_text)
             patient_id, _, _ = patients.search_criteria(number, "", "")
             version = 0 if version_text == "0" else outpatient.parse_visit_id(version_text)
@@ -971,11 +1062,11 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                     visit = outpatient.find_visit(connection, department, today, visit_id)
                     if visit and visit[1] == patient_id and clinical_notes.valid_key(
                         connection, key, visit_id, patient_id, version, staff[0],
-                        finalize=action == clinical_notes.FINALIZE_ACTION,
+                        action=action,
                     ):
                         confirmed_visit = visit
                         status, editor = self.apply_note_action(
-                            connection, action, today, department, visit, version, key, body, staff[0],
+                            connection, action, today, department, visit, version, key, body, reason, staff[0],
                         )
 
                 outcome = "denied" if not allowed else "success" if status == HTTPStatus.OK else "failed"
