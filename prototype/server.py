@@ -22,10 +22,11 @@ import auth
 import clinical_notes
 import outpatient
 import patients
+import prescriptions
 
 
 HOST = "127.0.0.1"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 CLINICAL_NOTE_ACTIONS = {
     "/outpatient/draft": clinical_notes.ACTION,
     "/outpatient/draft-review": clinical_notes.REVIEW_ACTION,
@@ -118,6 +119,9 @@ def initialize_database(path):
             version = 8
         if version == 8:
             clinical_notes.initialize_corrections(connection)
+            version = 9
+        if version == 9:
+            prescriptions.initialize_orders(connection)
             connection.execute(
                 "UPDATE prototype_metadata SET schema_version = ? WHERE id = 1",
                 (SCHEMA_VERSION,),
@@ -766,6 +770,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                         visits = [visit] if visit else []
                         if visit and staff[1] == "physician":
                             editor = self.current_note_editor(connection, today, department, visit, staff[0])
+                            editor += self.prescription_panel(connection, today, department, visit, staff[0])
                     else:
                         visits = outpatient.list_visits(connection, department, today, cursor)
                         has_next = len(visits) > outpatient.PAGE_SIZE
@@ -1088,6 +1093,127 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         else:
             self.send_outpatient_visit(today, department, confirmed_visit, editor=editor, status=status)
 
+    def prescription_panel(self, connection, visit_date, department, visit, actor_id, *, values=(), key="", message=""):
+        visit_id, patient_id, _, _ = visit
+        if not key:
+            key = prescriptions.new_key(connection, visit_id, patient_id, actor_id)
+        drug, dose, unit, directions, days = map(escape, values or ("", "", "", "", ""))
+        rows = []
+        for drug_name, amount, dose_unit, usage, duration, ordered_by, ordered_at in prescriptions.list_orders(
+            connection, visit_id,
+        ):
+            cells = (drug_name, amount, dose_unit, usage, str(duration), ordered_by, ordered_at)
+            rows.append("<tr>" + "".join(f"<td>{escape(cell)}</td>" for cell in cells) + "<td>指示済み・実施未記録</td></tr>")
+        listing = "<p>処方指示はまだありません。</p>"
+        if rows:
+            listing = f"""
+                <div class="table-scroll"><table>
+                  <caption>登録済みの処方指示</caption>
+                  <thead><tr><th scope="col">薬剤</th><th scope="col">用量</th><th scope="col">単位</th>
+                    <th scope="col">用法</th><th scope="col">日数</th><th scope="col">指示者ID</th>
+                    <th scope="col">指示日時（UTC）</th><th scope="col">状態</th></tr></thead>
+                  <tbody>{"".join(rows)}</tbody>
+                </table></div>
+            """
+        return f"""
+            <h3>処方指示</h3>
+            <p>架空の薬剤を入力してください。ここで登録するのは処方指示です。</p>
+            {listing}
+            <p role="status">{escape(message)}</p>
+            <form action="/outpatient/prescription" method="post" autocomplete="off">
+              <input type="hidden" name="visit_id" value="{visit_id}">
+              <input type="hidden" name="patient_number" value="{patients.patient_number(patient_id)}">
+              <input type="hidden" name="department" value="{department}">
+              <input type="hidden" name="visit_date" value="{visit_date}">
+              <input type="hidden" name="request_key" value="{key}">
+              <label>薬剤名 <input name="drug" required maxlength="100" value="{drug}"></label>
+              <label>用量 <input name="dose" required inputmode="decimal" maxlength="16" value="{dose}"></label>
+              <label>単位 <input name="unit" required maxlength="30" value="{unit}"></label>
+              <label>用法 <input name="directions" required maxlength="200" value="{directions}"></label>
+              <label>日数 <input name="days" type="number" required min="1" max="9999" value="{days}"></label>
+              <button>処方指示を登録する</button>
+            </form>
+        """
+
+    def submit_prescription_order(self):
+        today = date.today().isoformat()
+        try:
+            fields = self.read_form(max_fields=10, max_bytes=8192, keep_blank_values=True)
+            visit_text, = fields["visit_id"]
+            number, = fields["patient_number"]
+            department, = fields["department"]
+            visit_date, = fields["visit_date"]
+            key, = fields["request_key"]
+            visit_id = outpatient.parse_visit_id(visit_text)
+            patient_id, _, _ = patients.search_criteria(number, "", "")
+            valid = patient_id is not None and department in outpatient.DEPARTMENTS and visit_date == today
+        except (KeyError, ValueError):
+            valid = False
+
+        status = HTTPStatus.BAD_REQUEST
+        confirmed_visit = None
+        action = prescriptions.ACTION
+        try:
+            with closing(auth.connect(self.server.database)) as connection, connection:
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("BEGIN IMMEDIATE")
+                staff = self.current_staff(connection)
+                allowed = staff is not None and staff[1] == "physician"
+                outcome = "failed" if allowed else "denied"
+                if allowed and valid:
+                    visit = outpatient.find_visit(connection, department, today, visit_id)
+                    if visit and visit[1] == patient_id and prescriptions.valid_key(
+                        connection, key, visit_id, patient_id, staff[0],
+                    ):
+                        confirmed_visit = visit
+                        status, outcome, panel = self.apply_prescription_order(
+                            connection, today, department, visit, staff[0], key, fields,
+                        )
+
+                if outcome is not None:
+                    audit.record_event(
+                        connection, actor_id=staff[0] if staff else None,
+                        target_id=f"visit:{visit_id}" if confirmed_visit else action,
+                        action=action, outcome=outcome,
+                    )
+        except sqlite3.Error as error:
+            self.database_error(error)
+            return
+
+        if staff is None:
+            self.redirect("/login")
+        elif not allowed:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>処方指示を登録する権限がありません。</p>")
+        elif confirmed_visit is None:
+            self.send_outpatient_list(today, status=status, message="患者と受診を選び直してください。")
+        else:
+            self.send_outpatient_visit(today, department, confirmed_visit, editor=panel, status=status)
+
+    def apply_prescription_order(self, connection, today, department, visit, actor_id, key, fields):
+        values = [fields.get(field, [""]) for field in prescriptions.FIELD_NAMES]
+        if any(len(value) != 1 for value in values):
+            return HTTPStatus.BAD_REQUEST, "failed", self.prescription_panel(
+                connection, today, department, visit, actor_id, key=key, message="各項目を1つずつ入力してください。",
+            )
+        values = [value[0] for value in values]
+        try:
+            order = prescriptions.validate_order(*values)
+        except ValueError as error:
+            return HTTPStatus.BAD_REQUEST, "failed", self.prescription_panel(
+                connection, today, department, visit, actor_id, values=values, key=key, message=str(error),
+            )
+        try:
+            created = prescriptions.register_order(connection, visit[0], order, actor_id, key)
+        except prescriptions.OrderConflict:
+            return HTTPStatus.CONFLICT, "failed", self.prescription_panel(
+                connection, today, department, visit, actor_id, values=values,
+                message="送信済みの処方指示と一致しません。別の指示として入力内容を確認してください。",
+            )
+        status = HTTPStatus.CREATED if created else HTTPStatus.OK
+        return status, "success" if created else None, self.prescription_panel(
+            connection, today, department, visit, actor_id, message="処方指示を登録しました。",
+        )
+
     def do_POST(self):
         if not self.is_local_request():
             return
@@ -1096,7 +1222,9 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         is_patient_lookup = self.path in ("/patients/search", "/patients/confirm")
         is_outpatient_lookup = self.path in ("/outpatient/list", "/outpatient/visit")
         note_action = CLINICAL_NOTE_ACTIONS.get(self.path)
-        if self.path not in ("/login", "/logout", "/patients/new", "/outpatient/check-in") and not (
+        if self.path not in (
+            "/login", "/logout", "/patients/new", "/outpatient/check-in", "/outpatient/prescription",
+        ) and not (
             is_trial or is_patient_lookup or is_outpatient_lookup or note_action
         ):
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -1105,6 +1233,9 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN)
             return
 
+        if self.path == "/outpatient/prescription":
+            self.submit_prescription_order()
+            return
         if note_action:
             self.submit_clinical_note(note_action)
             return
