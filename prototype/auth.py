@@ -14,12 +14,18 @@ import warnings
 SESSION_SECONDS = 30 * 60
 MAX_PASSWORD_BYTES = 256
 STAFF_ID = re.compile(r"[A-Za-z0-9_-]{1,40}")
+# Listed from the lowest to the highest access level.
 ROLE_LABELS = {
     "reception": "受付",
-    "physician": "医師",
     "nurse": "看護師",
+    "physician": "医師",
     "admin": "管理者",
 }
+ROLE_LEVELS = {role: level for level, role in enumerate(ROLE_LABELS, start=1)}
+
+
+def has_role(staff, minimum_role):
+    return staff is not None and ROLE_LEVELS.get(staff[1], 0) >= ROLE_LEVELS[minimum_role]
 
 
 def initialize_auth(connection):

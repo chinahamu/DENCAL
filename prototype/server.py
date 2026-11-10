@@ -33,9 +33,6 @@ CLINICAL_NOTE_ACTIONS = {
     "/outpatient/finalize": clinical_notes.FINALIZE_ACTION,
     "/outpatient/correct": clinical_notes.CORRECTION_ACTION,
 }
-PATIENT_REGISTRATION_ROLE = "reception"
-PATIENT_SEARCH_ROLE = "reception"
-OUTPATIENT_VIEW_ROLES = {"reception", "physician"}
 TRIAL_TARGET_ID = "demo-patient-001"
 AUDIT_OUTCOMES = {"success": "成功", "denied": "拒否", "failed": "失敗"}
 TRIAL_OPERATIONS = {
@@ -159,16 +156,16 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         role_label = auth.ROLE_LABELS.get(role, "未割当")
         links = "".join(
             f'<li><a href="/trial/{name}">{title}</a></li>'
-            for name, (allowed_role, title) in TRIAL_OPERATIONS.items()
-            if allowed_role == role
+            for name, (minimum_role, title) in TRIAL_OPERATIONS.items()
+            if auth.has_role(staff, minimum_role)
         )
-        if role == PATIENT_REGISTRATION_ROLE:
-            links += '<li><a href="/patients/new">患者登録</a></li>'
-        if role == PATIENT_SEARCH_ROLE:
-            links += '<li><a href="/patients/search">患者検索</a></li>'
-        if role in OUTPATIENT_VIEW_ROLES:
-            links += '<li><a href="/outpatient/list">外来受付一覧</a></li>'
-        if role == "admin":
+        if auth.has_role(staff, "reception"):
+            links += (
+                '<li><a href="/patients/new">患者登録</a></li>'
+                '<li><a href="/patients/search">患者検索</a></li>'
+                '<li><a href="/outpatient/list">外来受付一覧</a></li>'
+            )
+        if auth.has_role(staff, "admin"):
             links += '<li><a href="/audit">監査ログ</a></li>'
         trial_menu = f"<ul>{links}</ul>" if links else "<p>利用できる試作用操作はありません。</p>"
         self.send_page(HTTPStatus.OK, f"""
@@ -202,7 +199,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         if staff is None:
             self.redirect("/login")
             return
-        if staff[1] != required_role:
+        if not auth.has_role(staff, required_role):
             self.send_page(HTTPStatus.FORBIDDEN, "<p>この操作を行う権限がありません。</p>")
             return
 
@@ -221,7 +218,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             with closing(auth.connect(self.server.database)) as connection, connection:
                 connection.execute("BEGIN IMMEDIATE")
                 staff = self.current_staff(connection)
-                allowed = staff is not None and staff[1] == required_role
+                allowed = auth.has_role(staff, required_role)
                 audit.record_event(
                     connection,
                     actor_id=staff[0] if staff else None,
@@ -246,7 +243,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             with closing(self.open_readonly_database()) as connection:
                 connection.execute("BEGIN")
                 staff = self.current_staff(connection)
-                events = audit.recent_events(connection) if staff and staff[1] == "admin" else None
+                events = audit.recent_events(connection) if auth.has_role(staff, "admin") else None
         except sqlite3.Error as error:
             if api:
                 self.log_error("監査ログ読み取りエラー: %s", error)
@@ -307,7 +304,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             return
         if staff is None:
             self.redirect("/login")
-        elif staff[1] != PATIENT_REGISTRATION_ROLE:
+        elif not auth.has_role(staff, "reception"):
             self.send_page(HTTPStatus.FORBIDDEN, "<p>患者を登録する権限がありません。</p>")
         else:
             self.send_patient_form()
@@ -351,7 +348,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             with closing(auth.connect(self.server.database)) as connection, connection:
                 connection.execute("BEGIN IMMEDIATE")
                 staff = self.current_staff(connection)
-                if staff is None or staff[1] != PATIENT_REGISTRATION_ROLE:
+                if not auth.has_role(staff, "reception"):
                     self.record_patient_registration(connection, staff, "denied")
                 elif error_message:
                     self.record_patient_registration(connection, staff, "failed")
@@ -376,7 +373,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
 
         if staff is None:
             self.redirect("/login")
-        elif staff[1] != PATIENT_REGISTRATION_ROLE:
+        elif not auth.has_role(staff, "reception"):
             self.send_page(HTTPStatus.FORBIDDEN, "<p>患者を登録する権限がありません。</p>")
         elif error_message:
             self.send_patient_form(status, message=error_message, name=name, birth_date=birth_date, key=key)
@@ -408,7 +405,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
 
         if staff is None:
             self.redirect("/login")
-        elif staff[1] != PATIENT_SEARCH_ROLE:
+        elif not auth.has_role(staff, "reception"):
             self.send_page(HTTPStatus.FORBIDDEN, "<p>患者情報を閲覧する権限がありません。</p>")
         else:
             self.send_patient_search()
@@ -479,7 +476,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             with closing(auth.connect(self.server.database)) as connection, connection:
                 connection.execute("BEGIN IMMEDIATE")
                 staff = self.current_staff(connection)
-                allowed = staff is not None and staff[1] == PATIENT_SEARCH_ROLE
+                allowed = auth.has_role(staff, "reception")
                 if allowed and criteria is not None:
                     matches = patients.search(connection, *criteria)
                     truncated = len(matches) > patients.SEARCH_LIMIT
@@ -578,7 +575,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                 connection.execute("PRAGMA foreign_keys = ON")
                 connection.execute("BEGIN IMMEDIATE")
                 staff = self.current_staff(connection)
-                allowed = staff is not None and staff[1] == PATIENT_SEARCH_ROLE
+                allowed = auth.has_role(staff, "reception")
                 outcome = "denied"
                 if allowed:
                     outcome = "failed"
@@ -648,7 +645,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             return
         if staff is None:
             self.redirect("/login")
-        elif staff[1] not in OUTPATIENT_VIEW_ROLES:
+        elif not auth.has_role(staff, "reception"):
             self.send_page(HTTPStatus.FORBIDDEN, "<p>外来受付を閲覧する権限がありません。</p>")
         else:
             self.send_outpatient_list(date.today().isoformat())
@@ -739,12 +736,12 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             with closing(auth.connect(self.server.database)) as connection, connection:
                 connection.execute("BEGIN IMMEDIATE")
                 staff = self.current_staff(connection)
-                allowed = staff is not None and staff[1] in OUTPATIENT_VIEW_ROLES
+                allowed = auth.has_role(staff, "reception")
                 if allowed and valid:
                     if detail:
                         visit = outpatient.find_visit(connection, department, today, cursor)
                         visits = [visit] if visit else []
-                        if visit and staff[1] == "physician":
+                        if visit and auth.has_role(staff, "physician"):
                             editor = self.current_note_editor(connection, today, department, visit, staff[0])
                             editor += self.prescription_panel(connection, today, department, visit, staff[0])
                     else:
@@ -1047,7 +1044,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                 connection.execute("PRAGMA foreign_keys = ON")
                 connection.execute("BEGIN IMMEDIATE")
                 staff = self.current_staff(connection)
-                allowed = staff is not None and staff[1] == "physician"
+                allowed = auth.has_role(staff, "physician")
                 if allowed and valid:
                     visit = outpatient.find_visit(connection, department, today, visit_id)
                     if visit and visit[1] == patient_id and clinical_notes.valid_key(
@@ -1143,7 +1140,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                 connection.execute("PRAGMA foreign_keys = ON")
                 connection.execute("BEGIN IMMEDIATE")
                 staff = self.current_staff(connection)
-                allowed = staff is not None and staff[1] == "physician"
+                allowed = auth.has_role(staff, "physician")
                 outcome = "failed" if allowed else "denied"
                 if allowed and valid:
                     visit = outpatient.find_visit(connection, department, today, visit_id)

@@ -53,22 +53,22 @@ python3 prototype/server.py --disable-staff demo-a
 
 ### 職種別の操作権限を確認する
 
-登録または職種の割り当てには、次のいずれかの値を指定します。ログイン後は、割り当てられた職種の試作用操作だけがメニューに表示されます。
+権限は **管理者 ＞ 医師 ＞ 看護師 ＞ 受付** の順です。上位の職種は下位の操作をすべて利用でき、メニューにも表示されます。
 
-| `--role` | 職種 | 試作用操作の画面 |
+| `--role` | 最低職種 | この段階で追加される操作 |
 | --- | --- | --- |
-| `reception` | 受付 | `/trial/reception-preview` |
-| `physician` | 医師 | `/trial/consultation-preview` |
+| `reception` | 受付 | 患者登録・検索・確認、外来受付の登録・一覧・受診情報の閲覧、`/trial/reception-preview` |
 | `nurse` | 看護師 | `/trial/nursing-preview` |
-| `admin` | 管理者 | `/trial/administration-preview` |
+| `physician` | 医師 | 診療録の保存・確定・訂正・履歴の閲覧、処方指示の登録・閲覧、`/trial/consultation-preview` |
+| `admin` | 管理者 | 監査ログの閲覧、`/trial/administration-preview` |
 
-既存の職員にはローカルのターミナルから職種を割り当てます。役割を指定せず登録した職員と、旧DBから移行した職員は「未割当」となり、ログインはできますが試作用操作は利用できません。
+既存の職員にはローカルのターミナルから職種を割り当てます。役割を指定せず登録した職員は「未割当」となり、ログインはできますが試作用操作は利用できません。
 
 ```bash
 python3 prototype/server.py --set-staff-role demo-a --role physician
 ```
 
-職種の変更は、ログイン中の職員にも次のリクエストから適用されます。各画面の「試行する」は同じ職種の操作APIを呼び、成功すると確認用のJSONを返します。例えば診察の試行は `POST /api/trial/consultation-preview` です。権限のない職種では、画面のURLを直接開く場合も、操作APIを直接呼ぶ場合も HTTP 403 になります。
+職種の変更は、ログイン中の職員にも次のリクエストから適用されます。各画面の「試行する」は対応する操作APIを呼び、成功すると確認用のJSONを返します。例えば診察の試行は `POST /api/trial/consultation-preview` です。権限のない職種では、画面のURLを直接開く場合も、操作APIを直接呼ぶ場合も HTTP 403 になります。
 
 ### 架空の操作の監査ログを確認する
 
@@ -98,7 +98,7 @@ python3 prototype/server.py --set-staff-role demo-a --role physician
 
 ### 診療科別の外来受付一覧を開く
 
-受付（`reception`）または医師（`physician`）で「外来受付一覧」を開き、診療科を選びます。試作サーバーのローカル日付を基準に、その診療科の当日分を受診ID順に50件ずつ表示します。
+受付以上の職種で「外来受付一覧」を開き、診療科を選びます。試作サーバーのローカル日付を基準に、その診療科の当日分を受診ID順に50件ずつ表示します。
 
 対象行の「開く」で、受診ID、患者番号、氏名、生年月日、診療科、来院日を確認できます。別の日付・診療科の受診IDを送っても、その一覧の受診としては開けません。管理者は `outpatient-list` と `outpatient-visit-view` の監査ログを受診IDで照合できます。
 
