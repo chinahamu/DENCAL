@@ -1,0 +1,17 @@
+# 添付GUIと初期データベースの対応
+
+添付のReactコンポーネントを使う。ブラウザー内のデモ状態とSQLiteの初期定義は独立している。病院での接続を実装する際は、画面の患者集約型をAPIで組み立て、DBでは患者と受診を分離する。
+
+| 画面 | SQLiteテーブル | 保存と表示の設計 |
+| --- | --- | --- |
+| 受付一覧・患者基本情報 | `patients`、`patient_insurances`、`encounters`、`departments`、`eligibility_checks` | 患者に複数受診と保険期間を紐付ける。年齢は生年月日と受診日から算出。受付番号は診療科・受付日内で一意 |
+| 主訴・アレルギー・登録傷病 | `encounters`、`patient_alerts`、`patient_diagnoses` | 主訴は受診単位、アレルギーと傷病は患者単位。登録元の受診を参照 |
+| SOAP・処方・検査オーダー | `clinical_note_drafts`、`prescription_orders`、`procedure_orders`、`procedure_performances` | SOAPの4項目は個別に保存。オーダーと実施を分離 |
+| 検査・バイタル推移 | `vital_signs`、`lab_panels`、`lab_results` | 測定日時・採取日時を使って受診をまたいで表示。BMIは身長・体重から算出 |
+| 版履歴・紹介状 | `clinical_note_revisions`、`note_order_snapshots`、`referral_documents` | 版に前版・確定者・確定時刻を記録。訂正には理由が必要。紹介状は参照版を特定 |
+| 受付・会計 | `billing_records`、`billing_lines`、`receipts` | 算定結果の内訳、精算、発行情報を分ける |
+| バックアップ・保存性 | `backup_snapshots`、`backup_checks` | 保管先参照と検証履歴を分ける。バックアップ本体はDBに入れない |
+| 安全管理・監査 | `staff`、`audit_events` | 職員・操作・対象・結果を保存する定義。画面のデモ職種切替とは独立 |
+| 外部マスター | `master_releases`、`master_items` | 薬剤・傷病・診療行為・検査を種別と版で分け、有効期間と取込ファイルのハッシュを記録 |
+
+参照したマスターの版に加え、登録時のコードと名称を明細に保持する。変更後のマスターで過去の表示を書き換えない。検査結果はマスターとの対応が付く前の受領結果も記録できる。実マスター取込、API、認証・サーバー側認可は今回の範囲外。
