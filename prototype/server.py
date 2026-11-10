@@ -25,7 +25,12 @@ import patients
 
 
 HOST = "127.0.0.1"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+CLINICAL_NOTE_ACTIONS = {
+    "/outpatient/draft": clinical_notes.ACTION,
+    "/outpatient/draft-review": clinical_notes.REVIEW_ACTION,
+    "/outpatient/finalize": clinical_notes.FINALIZE_ACTION,
+}
 PATIENT_REGISTRATION_ROLE = "reception"
 PATIENT_SEARCH_ROLE = "reception"
 OUTPATIENT_VIEW_ROLES = {"reception", "physician"}
@@ -106,6 +111,9 @@ def initialize_database(path):
             version = 6
         if version == 6:
             clinical_notes.initialize_drafts(connection)
+            version = 7
+        if version == 7:
+            clinical_notes.initialize_finalization(connection)
             connection.execute(
                 "UPDATE prototype_metadata SET schema_version = ? WHERE id = 1",
                 (SCHEMA_VERSION,),
@@ -753,9 +761,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                         visit = outpatient.find_visit(connection, department, today, cursor)
                         visits = [visit] if visit else []
                         if visit and staff[1] == "physician":
-                            body, version = clinical_notes.read_draft(connection, visit[0])
-                            key = clinical_notes.draft_key(connection, visit[0], visit[1], version, staff[0])
-                            editor = self.draft_form(today, department, visit, body, version, key)
+                            editor = self.current_note_editor(connection, today, department, visit, staff[0])
                     else:
                         visits = outpatient.list_visits(connection, department, today, cursor)
                         has_next = len(visits) > outpatient.PAGE_SIZE
@@ -813,35 +819,139 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             </section>
         """)
 
-    def draft_form(self, visit_date, department, visit, body, version, key, message=""):
+    def note_fields(self, visit_date, department, visit, version, key):
         visit_id, patient_id, _, _ = visit
+        return f"""
+            <input type="hidden" name="visit_id" value="{visit_id}">
+            <input type="hidden" name="patient_number" value="{patients.patient_number(patient_id)}">
+            <input type="hidden" name="department" value="{department}">
+            <input type="hidden" name="visit_date" value="{visit_date}">
+            <input type="hidden" name="version" value="{version}">
+            <input type="hidden" name="draft_key" value="{key}">
+        """
+
+    def draft_form(self, visit_date, department, visit, body, version, key, message=""):
+        fields = self.note_fields(visit_date, department, visit, version, key)
+        review_button = ""
+        if version:
+            review_button = f"""
+                <form action="/outpatient/draft-review" method="post">
+                  {fields}
+                  <button>保存済みの下書きを確定前に確認する</button>
+                </form>
+            """
         return f"""
             <h3>診療録の下書き</h3>
             <p role="status">{escape(message)}</p>
             <form action="/outpatient/draft" method="post" autocomplete="off">
-              <input type="hidden" name="visit_id" value="{visit_id}">
-              <input type="hidden" name="patient_number" value="{patients.patient_number(patient_id)}">
-              <input type="hidden" name="department" value="{department}">
-              <input type="hidden" name="visit_date" value="{visit_date}">
-              <input type="hidden" name="version" value="{version}">
-              <input type="hidden" name="draft_key" value="{key}">
+              {fields}
               <label>下書き本文 <textarea name="body" rows="8" required maxlength="{clinical_notes.MAX_DRAFT_LENGTH}">
 {escape(body)}</textarea></label>
               <button>下書きを保存する</button>
             </form>
+            {review_button}
         """
 
-    def submit_clinical_draft(self):
+    def readonly_note(self, note, heading):
+        origin = "（旧版から移行。初回作成日時の記録がないため旧版の保存日時を表示）" if note.created_at_estimated else ""
+        finalized = ""
+        if note.finalized_at:
+            finalized = f"""
+                <dt>確定者ID</dt><dd>{escape(note.finalized_by)}</dd>
+                <dt>確定日時（UTC）</dt><dd>{escape(note.finalized_at)}</dd>
+            """
+        return f"""
+            <h3>{heading}</h3>
+            <dl>
+              <dt>入力者ID</dt><dd>{escape(note.saved_by)}</dd>
+              <dt>作成日時（UTC）</dt><dd>{escape(note.created_at)}{origin}</dd>
+              {finalized}
+            </dl>
+            <label>保存済み本文 <textarea rows="8" readonly>
+{escape(note.body)}</textarea></label>
+        """
+
+    def current_note_editor(self, connection, visit_date, department, visit, staff_id):
+        note = clinical_notes.read_draft(connection, visit[0])
+        if note and note.finalized_at:
+            return self.readonly_note(note, "確定済み診療録")
+        body, version = (note.body, note.version) if note else ("", 0)
+        key = clinical_notes.draft_key(connection, visit[0], visit[1], version, staff_id)
+        return self.draft_form(visit_date, department, visit, body, version, key)
+
+    def note_conflict(self, visit_date, department, visit_id, message, submitted_body):
+        submitted = ""
+        if submitted_body is not None:
+            submitted = f"""<label>保存されなかった入力 <textarea rows="8" readonly>
+{escape(submitted_body)}</textarea></label>"""
+        return f"""
+            <p role="alert">{escape(message)}</p>
+            {submitted}
+            <form action="/outpatient/visit" method="post">
+              <input type="hidden" name="department" value="{department}">
+              <input type="hidden" name="visit_date" value="{visit_date}">
+              <button name="visit_id" value="{visit_id}">最新の診療録を開く</button>
+            </form>
+        """
+
+    def apply_note_action(self, connection, action, visit_date, department, visit, version, key, body, staff_id):
+        visit_id, patient_id, _, _ = visit
+        note = clinical_notes.read_draft(connection, visit_id)
+        if note and note.finalized_at:
+            message = "この診療録は確定済みです。"
+            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
+        if version != (note.version if note else 0) or (action != clinical_notes.ACTION and note is None):
+            message = "下書きの版が変わったか、下書きがまだありません。最新の診療録を開いてください。"
+            return HTTPStatus.CONFLICT, self.note_conflict(visit_date, department, visit_id, message, body)
+
+        if action == clinical_notes.REVIEW_ACTION:
+            final_key = clinical_notes.draft_key(connection, visit_id, patient_id, version, staff_id, finalize=True)
+            fields = self.note_fields(visit_date, department, visit, version, final_key)
+            editor = self.readonly_note(note, "診療録の確定前確認") + f"""
+                <p>保存済みの本文を確認してください。確定後は通常の編集画面から変更できません。</p>
+                <form action="/outpatient/finalize" method="post">
+                  {fields}
+                  <button>この内容で確定する</button>
+                </form>
+            """
+            return HTTPStatus.OK, editor
+
+        if action == clinical_notes.FINALIZE_ACTION:
+            if not clinical_notes.finalize_draft(connection, visit_id, version, staff_id):
+                raise sqlite3.IntegrityError("確定対象の版を更新できませんでした。")
+            finalized = clinical_notes.read_draft(connection, visit_id)
+            return HTTPStatus.OK, self.readonly_note(finalized, "確定済み診療録")
+
+        try:
+            body = clinical_notes.validate_body(body)
+        except ValueError as error:
+            return HTTPStatus.BAD_REQUEST, self.draft_form(visit_date, department, visit, body, version, key, str(error))
+        if not clinical_notes.save_draft(connection, visit_id, body, version, staff_id):
+            raise sqlite3.IntegrityError("下書きの版を更新できませんでした。")
+        next_key = clinical_notes.draft_key(connection, visit_id, patient_id, version + 1, staff_id)
+        return HTTPStatus.OK, self.draft_form(
+            visit_date, department, visit, body, version + 1, next_key, "下書きを保存しました。",
+        )
+
+    def submit_clinical_note(self, action):
+        saving = action == clinical_notes.ACTION
         today = date.today().isoformat()
+        body = None
         try:
             fields = self.read_form(max_fields=7, max_bytes=32768, keep_blank_values=True)
+            expected = {"department", "visit_date", "patient_number", "visit_id", "version", "draft_key"}
+            if saving:
+                expected.add("body")
+            if fields.keys() != expected:
+                raise ValueError
             department, = fields["department"]
             visit_date, = fields["visit_date"]
             number, = fields["patient_number"]
             visit_text, = fields["visit_id"]
             version_text, = fields["version"]
             key, = fields["draft_key"]
-            body, = fields["body"]
+            if saving:
+                body, = fields["body"]
             visit_id = outpatient.parse_visit_id(visit_text)
             patient_id, _, _ = patients.search_criteria(number, "", "")
             version = 0 if version_text == "0" else outpatient.parse_visit_id(version_text)
@@ -850,7 +960,6 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             valid = False
 
         status = HTTPStatus.BAD_REQUEST
-        message = "患者と受診を選び直してください。"
         confirmed_visit = None
         try:
             with closing(auth.connect(self.server.database)) as connection, connection:
@@ -862,27 +971,18 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                     visit = outpatient.find_visit(connection, department, today, visit_id)
                     if visit and visit[1] == patient_id and clinical_notes.valid_key(
                         connection, key, visit_id, patient_id, version, staff[0],
+                        finalize=action == clinical_notes.FINALIZE_ACTION,
                     ):
                         confirmed_visit = visit
-                        try:
-                            body = clinical_notes.validate_body(body)
-                        except ValueError as error:
-                            message = str(error)
-                        else:
-                            if clinical_notes.save_draft(connection, visit_id, body, version, staff[0]):
-                                status = HTTPStatus.OK
-                                message = "下書きを保存しました。"
-                                version += 1
-                                key = clinical_notes.draft_key(connection, visit_id, patient_id, version, staff[0])
-                            else:
-                                status = HTTPStatus.CONFLICT
-                                message = "別の画面で下書きが更新されたため、保存しませんでした。最新の下書きを開き直してください。"
+                        status, editor = self.apply_note_action(
+                            connection, action, today, department, visit, version, key, body, staff[0],
+                        )
 
                 outcome = "denied" if not allowed else "success" if status == HTTPStatus.OK else "failed"
                 audit.record_event(
                     connection, actor_id=staff[0] if staff else None,
-                    target_id=f"visit:{visit_id}" if confirmed_visit else clinical_notes.ACTION,
-                    action=clinical_notes.ACTION, outcome=outcome,
+                    target_id=f"visit:{visit_id}" if confirmed_visit else action,
+                    action=action, outcome=outcome,
                 )
         except sqlite3.Error as error:
             self.database_error(error)
@@ -891,24 +991,10 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         if staff is None:
             self.redirect("/login")
         elif not allowed:
-            self.send_page(HTTPStatus.FORBIDDEN, "<p>診療録を保存する権限がありません。</p>")
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>診療録を操作する権限がありません。</p>")
         elif confirmed_visit is None:
-            self.send_outpatient_list(today, status=status, message=message)
+            self.send_outpatient_list(today, status=status, message="患者と受診を選び直してください。")
         else:
-            if status == HTTPStatus.CONFLICT:
-                editor = f"""
-                    <h3>診療録の下書き</h3>
-                    <p role="alert">{escape(message)}</p>
-                    <label>保存されなかった入力 <textarea rows="8" readonly>
-{escape(body)}</textarea></label>
-                    <form action="/outpatient/visit" method="post">
-                      <input type="hidden" name="department" value="{department}">
-                      <input type="hidden" name="visit_date" value="{today}">
-                      <button name="visit_id" value="{visit_id}">最新の下書きを開く</button>
-                    </form>
-                """
-            else:
-                editor = self.draft_form(today, department, confirmed_visit, body, version, key, message)
             self.send_outpatient_visit(today, department, confirmed_visit, editor=editor, status=status)
 
     def do_POST(self):
@@ -918,8 +1004,9 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         is_trial = prefix == "/api/trial" and operation in TRIAL_OPERATIONS
         is_patient_lookup = self.path in ("/patients/search", "/patients/confirm")
         is_outpatient_lookup = self.path in ("/outpatient/list", "/outpatient/visit")
-        if self.path not in ("/login", "/logout", "/patients/new", "/outpatient/check-in", "/outpatient/draft") and not (
-            is_trial or is_patient_lookup or is_outpatient_lookup
+        note_action = CLINICAL_NOTE_ACTIONS.get(self.path)
+        if self.path not in ("/login", "/logout", "/patients/new", "/outpatient/check-in") and not (
+            is_trial or is_patient_lookup or is_outpatient_lookup or note_action
         ):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -927,8 +1014,8 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN)
             return
 
-        if self.path == "/outpatient/draft":
-            self.submit_clinical_draft()
+        if note_action:
+            self.submit_clinical_note(note_action)
             return
         if is_outpatient_lookup:
             self.submit_outpatient_lookup(detail=self.path == "/outpatient/visit")
