@@ -50,6 +50,7 @@ def main():
     try:
         with closing(sqlite3.connect(path)) as connection:
             connection.executescript(schema)
+            connection.executescript(Path(__file__).with_name("catalog-details.sql").read_text(encoding="utf-8"))
             credentials = seed_demo_staff(connection)
     except Exception:
         path.unlink()

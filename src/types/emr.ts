@@ -19,7 +19,14 @@ export interface AllergyItem {
   reaction: string;
 }
 
+export interface MasterReference {
+  itemId: number;
+  code: string;
+  releaseDate: string;
+}
+
 export interface DiseaseRecord {
+  master?: MasterReference;
   id: string;
   icd10Code: string;
   name: string;
@@ -58,22 +65,25 @@ export interface LabPanelRecord {
 }
 
 export interface PrescriptionItem {
+  master?: MasterReference;
+  priceCode?: string;
   id: string;
-  yjCode: string;
+  yjCode?: string;
   drugName: string;
   dosagePerDay: string;
   usage: string;
   days: number;
   category: 'internal' | 'external' | 'as_needed';
   genericAllowed: boolean;
-  pointsPerDay: number;
+  pointsPerDay?: number;
 }
 
 export interface LabOrderItem {
+  master?: MasterReference;
   id: string;
   code: string;
   name: string;
-  points: number;
+  points?: number;
 }
 
 export interface SoapContent {
@@ -190,6 +200,7 @@ export interface AuditLogEntry {
     | 'SOAP_SIGN'
     | 'SOAP_REVISION'
     | 'PRESCRIPTION_ADD'
+    | 'DIAGNOSIS_UPDATE'
     | 'PATIENT_REGISTER'
     | 'BILLING_SETTLE'
     | 'BACKUP_CREATE'

@@ -12,6 +12,7 @@ const minimum = {
   create_backup: 'admin',
   restore_backup: 'admin',
   view_audit: 'admin',
+  manage_catalog: 'admin',
 } satisfies Record<string, UserRole>;
 
 export type EmrAction = keyof typeof minimum;

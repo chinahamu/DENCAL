@@ -3,6 +3,7 @@ import {
   AllergyItem,
   AuditLogEntry,
   BackupSnapshot,
+  DiseaseRecord,
   LabOrderItem,
   PatientRecord,
   PrescriptionItem,
@@ -18,6 +19,7 @@ import {
   INITIAL_PATIENTS,
 } from './data/seedData';
 import { computePayloadChecksum, computeRecordHash } from './utils/emrLogic';
+import { CatalogAdmin } from './components/CatalogAdmin';
 import { ClinicalWorkbench } from './components/ClinicalWorkbench';
 import { ReceptionBillingView } from './components/ReceptionBillingView';
 import { BackupPreservationView } from './components/BackupPreservationView';
@@ -26,7 +28,7 @@ import { NewPatientModal } from './components/NewPatientModal';
 import { StaffLogin } from './components/StaffLogin';
 import { canPerformAction, type EmrAction } from './utils/permissions';
 
-type MainNavView = 'workbench' | 'reception_billing' | 'backup_dr' | 'security_audit';
+type MainNavView = 'workbench' | 'reception_billing' | 'backup_dr' | 'security_audit' | 'catalog';
 
 export default function App() {
   const [staff, setStaff] = useState<StaffMember | null>(null);
@@ -117,7 +119,7 @@ function Workspace({ currentStaff, onLogout, authorize }: WorkspaceProps) {
   const [accessMessage, setAccessMessage] = useState('');
   const can = (action: EmrAction) => canPerformAction(currentStaff.role, action);
 
-  async function openAdminView(view: 'backup_dr' | 'security_audit', action: EmrAction) {
+  async function openAdminView(view: 'backup_dr' | 'security_audit' | 'catalog', action: EmrAction) {
     setAccessMessage('');
     if (await authorize(action)) {
       setActiveView(view);
@@ -185,6 +187,20 @@ function Workspace({ currentStaff, onLogout, authorize }: WorkspaceProps) {
           : p
       )
     );
+  };
+
+  const handleToggleDiagnosis = (patientId: string, disease: DiseaseRecord) => {
+    if (!can('edit_soap')) return;
+    setPatients((prev) => prev.map((patient) => {
+      if (patient.id !== patientId) return patient;
+      const exists = patient.diseases.some((entry) => entry.id === disease.id);
+      return {
+        ...patient, isSigned: false,
+        diseases: exists ? patient.diseases.filter((entry) => entry.id !== disease.id) : [...patient.diseases, disease],
+      };
+    }));
+    const pt = patients.find((patient) => patient.id === patientId);
+    if (pt) appendAuditLog('DIAGNOSIS_UPDATE', `登録傷病名を更新：${disease.name}`, { id: pt.id, name: pt.kanjiName });
   };
 
   const handleAddPrescription = (patientId: string, item: PrescriptionItem) => {
@@ -541,6 +557,12 @@ function Workspace({ currentStaff, onLogout, authorize }: WorkspaceProps) {
               安全管理・監査証跡
             </a>
           )}
+          {can('manage_catalog') && (
+            <button type="button" onClick={() => void openAdminView('catalog', 'manage_catalog')}
+              className={`py-1 whitespace-nowrap shrink-0 ${activeView === 'catalog' ? 'font-bold text-teal-800' : 'hover:text-slate-900'}`}>
+              マスター管理
+            </button>
+          )}
         </nav>
 
         {/* Zone 3: 1 primary action */}
@@ -582,6 +604,7 @@ function Workspace({ currentStaff, onLogout, authorize }: WorkspaceProps) {
             currentStaff={currentStaff}
             onSelectPatient={handleSelectPatient}
             onUpdateSoap={handleUpdateSoap}
+            onToggleDiagnosis={handleToggleDiagnosis}
             onAddPrescription={handleAddPrescription}
             onRemovePrescription={handleRemovePrescription}
             onToggleLabOrder={handleToggleLabOrder}
@@ -614,6 +637,8 @@ function Workspace({ currentStaff, onLogout, authorize }: WorkspaceProps) {
             }}
           />
         )}
+
+        {activeView === 'catalog' && can('manage_catalog') && <CatalogAdmin />}
 
         {activeView === 'backup_dr' && can('create_backup') && (
           <BackupPreservationView

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -24,7 +24,8 @@ import {
 } from 'lucide-react';
 import {
   AllergyItem,
-  DrugCatalogItem,
+  DiseaseRecord,
+  MasterReference,
   LabOrderItem,
   PatientRecord,
   PrescriptionItem,
@@ -34,8 +35,6 @@ import {
   VitalRecord,
 } from '../types/emr';
 import {
-  DRUG_CATALOG,
-  LAB_ORDER_CATALOG,
   SOAP_TEMPLATES,
   CLINIC_INFO,
 } from '../data/seedData';
@@ -45,12 +44,20 @@ import {
   evaluateLabFlag,
 } from '../utils/emrLogic';
 
+import type { CatalogEntry } from '../types/catalog';
+import { ClinicalCatalogPicker } from './ClinicalCatalogPicker';
+
+function masterReference(entry: CatalogEntry): MasterReference {
+  return { itemId: entry.id, code: entry.code, releaseDate: entry.releaseDate };
+}
+
 interface ClinicalWorkbenchProps {
   patients: PatientRecord[];
   selectedPatientId: string;
   currentStaff: StaffMember;
   onSelectPatient: (patientId: string) => void;
   onUpdateSoap: (patientId: string, soap: SoapContent) => void;
+  onToggleDiagnosis: (patientId: string, disease: DiseaseRecord) => void;
   onAddPrescription: (patientId: string, item: PrescriptionItem) => void;
   onRemovePrescription: (patientId: string, prescriptionId: string) => void;
   onToggleLabOrder: (patientId: string, labOrder: LabOrderItem) => void;
@@ -102,6 +109,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   currentStaff,
   onSelectPatient,
   onUpdateSoap,
+  onToggleDiagnosis,
   onAddPrescription,
   onRemovePrescription,
   onToggleLabOrder,
@@ -119,12 +127,28 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   const [centerTab, setCenterTab] = useState<CenterSubTab>('soap');
   const [soapGridMode, setSoapGridMode] = useState<'grid' | 'stack'>('grid');
 
-  // Prescription builder state
-  const [selectedDrugCode, setSelectedDrugCode] = useState<string>(DRUG_CATALOG[0].yjCode);
-  const [rxDays, setRxDays] = useState<number>(28);
-  const [rxDosage, setRxDosage] = useState<string>(DRUG_CATALOG[0].defaultDosage);
-  const [rxUsage, setRxUsage] = useState<string>(DRUG_CATALOG[0].defaultUsage);
-  const [overrideContraConfirm, setOverrideContraConfirm] = useState<boolean>(false);
+  const [selectedDisease, setSelectedDisease] = useState<CatalogEntry>();
+  const [selectedDrug, setSelectedDrug] = useState<CatalogEntry>();
+  const [selectedLab, setSelectedLab] = useState<CatalogEntry>();
+  const [suspected, setSuspected] = useState(false);
+  const [rxDays, setRxDays] = useState('');
+  const [rxDosage, setRxDosage] = useState('');
+  const [rxUsage, setRxUsage] = useState('');
+  const [rxAsNeeded, setRxAsNeeded] = useState(false);
+  const [overrideContraConfirm, setOverrideContraConfirm] = useState(false);
+  const rxDayCount = Number(rxDays);
+
+  useEffect(() => {
+    setSelectedDisease(undefined);
+    setSelectedDrug(undefined);
+    setSelectedLab(undefined);
+    setSuspected(false);
+    setRxDays('');
+    setRxDosage('');
+    setRxUsage('');
+    setRxAsNeeded(false);
+    setOverrideContraConfirm(false);
+  }, [selectedPatientId]);
 
   // Revision reason when modifying an already-signed chart
   const [revisionReason, setRevisionReason] = useState<string>('');
@@ -171,28 +195,13 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
     });
   }, [patients, queueFilter, searchQuery]);
 
-  // Latest eGFR for drug safety check
-  const latestEgfr = useMemo(() => {
-    if (!selectedPatient || selectedPatient.labHistory.length === 0) return undefined;
-    const item = selectedPatient.labHistory[0].items.find((i) => i.code === 'eGFR');
-    return item?.value;
-  }, [selectedPatient]);
-
-  const selectedCatalogDrug: DrugCatalogItem = useMemo(
-    () => DRUG_CATALOG.find((d) => d.yjCode === selectedDrugCode) || DRUG_CATALOG[0],
-    [selectedDrugCode]
-  );
-
   const drugSafetyWarnings = useMemo(() => {
-    if (!selectedPatient) return [];
+    if (!selectedPatient || !selectedDrug) return [];
     return checkDrugSafety(
-      selectedCatalogDrug,
-      selectedPatient.allergies,
-      selectedPatient.contraindicatedClasses,
-      selectedPatient.currentPrescriptions,
-      latestEgfr
+      { masterCode: selectedDrug.code, yjCode: '', drugName: selectedDrug.name, drugClass: '', contraindicationKeywords: [] },
+      selectedPatient.allergies, [], selectedPatient.currentPrescriptions,
     );
-  }, [selectedCatalogDrug, selectedPatient, latestEgfr]);
+  }, [selectedDrug, selectedPatient]);
 
   const hasHardContraindication = drugSafetyWarnings.some((w) => w.severity === 'error');
 
@@ -201,35 +210,64 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   const canAddRx = canPerformAction(currentStaff.role, 'add_prescription');
   const canRecordVitals = canPerformAction(currentStaff.role, 'record_vitals');
 
-  const handleSelectDrugChange = (yjCode: string) => {
-    setSelectedDrugCode(yjCode);
-    const found = DRUG_CATALOG.find((d) => d.yjCode === yjCode);
-    if (found) {
-      setRxDosage(found.defaultDosage);
-      setRxUsage(found.defaultUsage);
-      setRxDays(found.defaultDays);
-      setOverrideContraConfirm(false);
-    }
-  };
+  const canAddDiagnosis = canEditSoap && selectedDisease &&
+    !selectedPatient?.diseases.some((entry) => entry.master?.code === selectedDisease.code);
+  const canSubmitRx = canAddRx && selectedDrug && rxDosage.trim() && rxUsage.trim() &&
+    Number.isInteger(rxDayCount) && rxDayCount >= 1 && rxDayCount <= 90 &&
+    (!hasHardContraindication || overrideContraConfirm);
+  const canAddLab = canAddRx && selectedLab &&
+    !selectedPatient?.currentLabOrders.some((entry) => entry.code === selectedLab.code);
 
-  const handleAddPrescriptionClick = () => {
-    if (!selectedPatient || !canAddRx) return;
-    if (hasHardContraindication && !overrideContraConfirm) return;
-
-    const newItem: PrescriptionItem = {
-      id: `rx-${Date.now()}`,
-      yjCode: selectedCatalogDrug.yjCode,
-      drugName: selectedCatalogDrug.drugName,
-      dosagePerDay: rxDosage,
-      usage: rxUsage,
-      days: rxDays,
-      category: selectedCatalogDrug.defaultUsage.includes('頓服') ? 'as_needed' : 'internal',
-      genericAllowed: true,
-      pointsPerDay: selectedCatalogDrug.pointsPerDay,
-    };
-    onAddPrescription(selectedPatient.id, newItem);
+  function selectDrug(entry: CatalogEntry | undefined) {
+    setSelectedDrug(entry);
+    setRxDosage('');
+    setRxUsage('');
+    setRxDays('');
+    setRxAsNeeded(false);
     setOverrideContraConfirm(false);
-  };
+  }
+
+  function addDiagnosis() {
+    if (!selectedPatient || !canAddDiagnosis || !selectedDisease) return;
+    onToggleDiagnosis(selectedPatient.id, {
+      id: `disease-${crypto.randomUUID()}`,
+      master: masterReference(selectedDisease),
+      name: selectedDisease.name,
+      icd10Code: selectedDisease.icd10,
+      isMain: !selectedPatient.diseases.some((entry) => entry.isMain && entry.outcome !== 'cured'),
+      isChronicDiseaseTarget: false,
+      startDate: new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }),
+      outcome: suspected ? 'suspected' : 'ongoing',
+    });
+    setSuspected(false);
+  }
+
+  function handleAddPrescriptionClick() {
+    if (!selectedPatient || !canSubmitRx || !selectedDrug) return;
+    onAddPrescription(selectedPatient.id, {
+      id: `rx-${crypto.randomUUID()}`,
+      master: masterReference(selectedDrug),
+      priceCode: selectedDrug.priceCode || undefined,
+      drugName: selectedDrug.name,
+      dosagePerDay: rxDosage.trim(),
+      usage: rxUsage.trim(),
+      days: rxDayCount,
+      category: selectedDrug.drugForm === '6' ? 'external' : rxAsNeeded ? 'as_needed' : 'internal',
+      genericAllowed: false,
+    });
+    selectDrug(undefined);
+  }
+
+  function addLab() {
+    if (!selectedPatient || !canAddLab || !selectedLab) return;
+    onToggleLabOrder(selectedPatient.id, {
+      id: `official-${selectedLab.code}`,
+      master: masterReference(selectedLab),
+      code: selectedLab.code,
+      name: selectedLab.name,
+    });
+    setSelectedLab(undefined);
+  }
 
   const handleSignClick = () => {
     if (!selectedPatient || !canSignSoap) return;
@@ -845,7 +883,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
 
             {/* Active ICD-10 Diseases Strip (4 cols) */}
             <div className="lg:col-span-4 p-3 bg-slate-50/80 border border-slate-200 rounded-md space-y-1.5">
-              <div className="text-xs font-bold text-slate-800">登録傷病名（ICD-10準拠）</div>
+              <div className="text-xs font-bold text-slate-800">登録傷病名</div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                 {selectedPatient.diseases.map((dis, idx) => (
                   <React.Fragment key={dis.id}>
@@ -853,13 +891,30 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                     <span className="text-slate-900 font-semibold">
                       <span className="font-mono text-teal-800 mr-1">{dis.icd10Code}</span>
                       {dis.name}
+                      {dis.master && <span className="ml-1 font-mono text-slate-500">{dis.master.code}</span>}
                       <span className="text-slate-500 font-normal ml-1">
-                        ({dis.isMain ? '主病' : '副傷病'})
+                        ({dis.isMain ? '主病' : '副傷病'}{dis.outcome === 'suspected' ? '・疑い' : ''})
                       </span>
                     </span>
+                    {canEditSoap && dis.master && (
+                      <button type="button" aria-label={`${dis.name}を取り消す`}
+                        className="rounded p-0.5 text-slate-500 hover:text-red-700"
+                        onClick={() => onToggleDiagnosis(selectedPatient.id, dis)}><Trash2 size={14} /></button>
+                    )}
                   </React.Fragment>
                 ))}
               </div>
+              {!selectedPatient.diseases.length && <p className="text-xs text-slate-500">登録されている傷病名はありません。</p>}
+              {canEditSoap && (
+                <>
+                  <ClinicalCatalogPicker key={selectedPatient.id} kind="diagnosis" value={selectedDisease} onSelect={setSelectedDisease} />
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    <label><input type="checkbox" checked={suspected} onChange={(e) => setSuspected(e.target.checked)} /> 疑い病名</label>
+                    <button type="button" disabled={!canAddDiagnosis} onClick={addDiagnosis}
+                      className="rounded bg-teal-800 px-2.5 py-1.5 text-white disabled:opacity-50">傷病名を追加</button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </section>
@@ -1275,7 +1330,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
               <div className="lg:col-span-7 space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-bold text-slate-900">
-                    処方オーダ（院外処方箋・アレルギー/腎機能チェック連動）
+                    処方オーダ（デモ）
                   </h3>
                   <span className="text-xs font-semibold text-slate-600 tabular-nums">
                     現在 {selectedPatient.currentPrescriptions.length} 剤登録中
@@ -1287,7 +1342,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                     <table className="w-full text-left border-collapse">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-600">
-                          <th className="py-2 px-3">薬剤名称 / YJコード</th>
+                          <th className="py-2 px-3">薬剤名称 / コード</th>
                           <th className="py-2 px-3">1日用量・用法</th>
                           <th className="py-2 px-3 text-right">日数/回数</th>
                           <th className="py-2 px-3 text-right">削除</th>
@@ -1299,7 +1354,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                             <td className="py-2.5 px-3">
                               <div className="font-bold text-slate-900 text-sm">{rx.drugName}</div>
                               <div className="text-[11px] text-slate-500 font-mono tabular-nums">
-                                YJ:{rx.yjCode} · {rx.genericAllowed ? '一般名処方加算対象' : '銘柄指定'}
+                                {rx.master ? `レセ電算 ${rx.master.code}${rx.priceCode ? ` · 薬価基準 ${rx.priceCode}` : ''}` : `YJ:${rx.yjCode}`}
                               </div>
                             </td>
                             <td className="py-2.5 px-3 text-slate-800 font-medium">
@@ -1331,83 +1386,30 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                   </div>
                 )}
 
-                {/* Add Prescription Controls */}
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md space-y-2.5">
-                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
-                    <div className="sm:col-span-5">
-                      <label
-                        htmlFor="drug-select"
-                        className="block text-xs font-semibold text-slate-700 mb-1"
-                      >
-                        採用薬マスタ選択
-                      </label>
-                      <select
-                        id="drug-select"
-                        disabled={!canAddRx}
-                        value={selectedDrugCode}
-                        onChange={(e) => handleSelectDrugChange(e.target.value)}
-                        className="w-full px-2.5 py-2 text-xs bg-white border border-slate-300 rounded text-slate-900"
-                      >
-                        {DRUG_CATALOG.map((d) => (
-                          <option key={d.yjCode} value={d.yjCode}>
-                            {d.drugName} [{d.drugClass}]
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="sm:col-span-3">
-                      <label
-                        htmlFor="rx-usage-input"
-                        className="block text-xs font-semibold text-slate-700 mb-1"
-                      >
-                        用法・用量
-                      </label>
-                      <input
-                        id="rx-usage-input"
-                        type="text"
-                        disabled={!canAddRx}
-                        value={`${rxDosage} / ${rxUsage}`}
-                        onChange={(e) => {
-                          const parts = e.target.value.split('/');
-                          setRxDosage((parts[0] || '').trim());
-                          setRxUsage((parts[1] || '').trim());
-                        }}
-                        className="w-full px-2.5 py-2 text-xs bg-white border border-slate-300 rounded text-slate-900"
-                      />
-                    </div>
-
-                    <div className="sm:col-span-2">
-                      <label
-                        htmlFor="rx-days-input"
-                        className="block text-xs font-semibold text-slate-700 mb-1"
-                      >
-                        日数/回数
-                      </label>
-                      <input
-                        id="rx-days-input"
-                        type="number"
-                        min={1}
-                        max={90}
-                        disabled={!canAddRx}
-                        value={rxDays}
-                        onChange={(e) => setRxDays(Number(e.target.value) || 1)}
-                        className="w-full px-2.5 py-2 text-xs font-mono tabular-nums bg-white border border-slate-300 rounded text-slate-900"
-                      />
-                    </div>
-
-                    <div className="sm:col-span-2">
-                      <button
-                        type="button"
-                        disabled={!canAddRx || (hasHardContraindication && !overrideContraConfirm)}
-                        onClick={handleAddPrescriptionClick}
-                        className="w-full py-2 px-3 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 disabled:bg-slate-300 rounded transition-colors flex items-center justify-center gap-1 whitespace-nowrap"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        処方追加
-                      </button>
-                    </div>
+                {canAddRx && <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md space-y-2.5">
+                  <ClinicalCatalogPicker key={selectedPatient.id} kind="drug" value={selectedDrug} onSelect={selectDrug} />
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                    <label className="grid gap-1">用量{selectedDrug?.unit ? `（規格単位 ${selectedDrug.unit}）` : ''}
+                      <input className="rounded border border-slate-300 bg-white px-2 py-1.5" value={rxDosage}
+                        onChange={(event) => setRxDosage(event.target.value)} maxLength={100} />
+                    </label>
+                    <label className="grid gap-1">用法
+                      <input className="rounded border border-slate-300 bg-white px-2 py-1.5" value={rxUsage}
+                        onChange={(event) => setRxUsage(event.target.value)} maxLength={120} />
+                    </label>
+                    <label className="grid gap-1">日数・回数
+                      <input className="rounded border border-slate-300 bg-white px-2 py-1.5" type="number" min={1} max={90}
+                        value={rxDays} onChange={(event) => setRxDays(event.target.value)} />
+                    </label>
                   </div>
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    {selectedDrug?.drugForm === '1' && (
+                      <label><input type="checkbox" checked={rxAsNeeded} onChange={(e) => setRxAsNeeded(e.target.checked)} /> 頓服</label>
+                    )}
+                    <button type="button" disabled={!canSubmitRx} onClick={handleAddPrescriptionClick}
+                      className="rounded bg-teal-800 px-2.5 py-1.5 text-white disabled:opacity-50">処方追加</button>
+                  </div>
+                  <p className="text-xs text-slate-600">マスターは名称・規格の参照用です。照合は薬剤名と同一薬剤の重複候補に限られます。禁忌・相互作用・腎機能別用量は確認できません。</p>
 
                   {/* Real-time Drug Safety Warnings */}
                   {drugSafetyWarnings.length > 0 && (
@@ -1433,13 +1435,13 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                               checked={overrideContraConfirm}
                               onChange={(e) => setOverrideContraConfirm(e.target.checked)}
                             />
-                            医師判断で禁忌強制処方を許可する（理由をカルテに明記）
+                            医師判断で薬剤名の一致を確認したうえでデモオーダに追加する
                           </label>
                         </div>
                       )}
                     </div>
                   )}
-                </div>
+                </div>}
               </div>
 
               {/* Right 5 Cols: Lab Order Selection */}
@@ -1452,35 +1454,24 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                     選択中 {selectedPatient.currentLabOrders.length} 項目
                   </span>
                 </div>
-                <div className="grid grid-cols-1 gap-2">
-                  {LAB_ORDER_CATALOG.map((lab) => {
-                    const checked = selectedPatient.currentLabOrders.some((l) => l.id === lab.id);
-                    return (
-                      <label
-                        key={lab.id}
-                        className={`p-2.5 rounded-md border text-xs flex items-center justify-between gap-2 cursor-pointer transition-colors ${
-                          checked
-                            ? 'bg-teal-50/70 border-teal-600 text-slate-900 font-semibold'
-                            : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <input
-                            type="checkbox"
-                            disabled={!canEditSoap}
-                            checked={checked}
-                            onChange={() => onToggleLabOrder(selectedPatient.id, lab)}
-                            className="accent-teal-700"
-                          />
-                          <span className="truncate">{lab.name}</span>
-                        </div>
-                        <span className="font-mono text-xs text-slate-500 tabular-nums shrink-0">
-                          {lab.code}
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
+                {canAddRx && (
+                  <>
+                    <ClinicalCatalogPicker key={selectedPatient.id} kind="procedure" value={selectedLab} onSelect={setSelectedLab} />
+                    <button type="button" disabled={!canAddLab} onClick={addLab}
+                      className="rounded bg-teal-800 px-2.5 py-1.5 text-xs text-white disabled:opacity-50">検査を追加</button>
+                  </>
+                )}
+                <ul className="grid gap-2">
+                  {selectedPatient.currentLabOrders.map((lab) => (
+                    <li key={lab.id} className="flex items-center justify-between gap-2 rounded border border-slate-200 px-2.5 py-2 text-xs">
+                      <span>{lab.name} · <span className="font-mono">{lab.code}</span></span>
+                      {canAddRx && <button type="button" aria-label={`${lab.name}を取り消す`}
+                        onClick={() => onToggleLabOrder(selectedPatient.id, lab)} className="p-1 text-slate-500 hover:text-red-700">
+                        <Trash2 size={14} />
+                      </button>}
+                    </li>
+                  ))}
+                </ul>
               </div>
             </div>
 

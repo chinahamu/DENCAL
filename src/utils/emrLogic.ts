@@ -29,7 +29,7 @@ export function computeRecordHash(
     o: soap.objective.trim(),
     a: soap.assessment.trim(),
     p: soap.plan.trim(),
-    rx: prescriptions.map((r) => `${r.yjCode}:${r.dosagePerDay}:${r.days}`),
+    rx: prescriptions.map((r) => `${r.master?.code ?? r.yjCode}:${r.dosagePerDay}:${r.days}`),
     labs: labOrders.map((l) => l.code),
     signerId,
     timestamp,
@@ -87,7 +87,7 @@ export interface DrugSafetyWarning {
  * Checks a candidate drug against patient allergies, contraindications, duplicate classes, and renal function (eGFR).
  */
 export function checkDrugSafety(
-  drug: DrugCatalogItem,
+  drug: Pick<DrugCatalogItem, 'yjCode' | 'drugName' | 'drugClass' | 'contraindicationKeywords' | 'renalCautionEgfrBelow'> & { masterCode?: string },
   allergies: AllergyItem[],
   contraindicatedClasses: string[],
   existingPrescriptions: PrescriptionItem[],
@@ -106,7 +106,7 @@ export function checkDrugSafety(
     if (matchedKeyword || drug.drugName.includes(allergy.substance)) {
       warnings.push({
         severity: 'error',
-        reason: `禁忌アラート：患者アレルギー歴「${allergy.substance}」（${allergy.reaction}）に該当する成分・系統（${drug.drugClass}）です。`,
+        reason: `禁忌アラート：患者アレルギー歴「${allergy.substance}」（${allergy.reaction}）と薬剤名または登録済みの成分・系統情報が一致します。`,
       });
     }
   }
@@ -125,7 +125,9 @@ export function checkDrugSafety(
   }
 
   // 3. Check duplicate prescription
-  if (existingPrescriptions.some((rx) => rx.yjCode === drug.yjCode)) {
+  if (existingPrescriptions.some((rx) => drug.masterCode
+    ? rx.master?.code === drug.masterCode || rx.drugName.normalize('NFKC') === drug.drugName.normalize('NFKC')
+    : Boolean(drug.yjCode) && rx.yjCode === drug.yjCode)) {
     warnings.push({
       severity: 'warning',
       reason: `重複処方注意：「${drug.drugName}」は既に今回の処方オーダーに含まれています。`,
@@ -205,13 +207,14 @@ export function calculateMedicalFeePoints(
   }
 
   // D 検査料 + 判断料
-  if (labOrders.length > 0) {
-    const labSum = labOrders.reduce((acc, item) => acc + item.points, 0);
+  const demoLabs = labOrders.filter((item) => item.points !== undefined);
+  if (demoLabs.length > 0) {
+    const labSum = demoLabs.reduce((acc, item) => acc + (item.points ?? 0), 0);
     items.push({
       category: '検査',
-      name: `検体検査・生体検査（${labOrders.length}項目）`,
+      name: `検体検査・生体検査（${demoLabs.length}項目）`,
       points: labSum,
-      note: labOrders.map((l) => l.name).join('・'),
+      note: demoLabs.map((l) => l.name).join('・'),
     });
     items.push({
       category: '検査',

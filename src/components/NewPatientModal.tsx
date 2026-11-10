@@ -80,17 +80,7 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
           ]
         : [],
       contraindicatedClasses: [],
-      diseases: [
-        {
-          id: `DIS-${Date.now()}`,
-          icd10Code: 'R50.9',
-          name: '初診精査中（主訴に基づく鑑別）',
-          isMain: true,
-          isChronicDiseaseTarget: false,
-          startDate: '2026-11-09',
-          outcome: 'suspected',
-        },
-      ],
+      diseases: [],
       vitalsHistory: [
         {
           measuredAt: `2026-11-09 ${nowTime}`,

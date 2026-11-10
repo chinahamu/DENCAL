@@ -2,6 +2,7 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypt
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { CatalogError, listCatalogs, receiveCatalog, saveCatalog, searchCatalog } from './catalog';
 import type { StaffMember } from '../src/types/emr';
 import { canPerformAction, isEmrAction } from '../src/utils/permissions';
 
@@ -82,11 +83,13 @@ export function createAuthMiddleware() {
     const route = req.url?.split('?')[0];
     if (!route?.startsWith('/api/')) return next();
     const host = req.headers.host ?? '';
-    if (!loopbackHost.test(host)) return json(res, 403, { error: 'forbidden' });
+    if (!loopbackHost.test(host) || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')) return json(res, 403, { error: 'forbidden' });
 
     const access = /^\/api\/access\/([a-z_]+)$/.exec(route)?.[1];
-    const read = route === '/api/session' || (access !== undefined && isEmrAction(access));
-    const write = route === '/api/login' || route === '/api/logout';
+    const catalogSearch = route === '/api/catalog/search';
+    const catalog = route === '/api/catalog';
+    const read = catalogSearch || (catalog && req.method !== 'POST') || route === '/api/session' || (access !== undefined && isEmrAction(access));
+    const write = (catalog && req.method === 'POST') || route === '/api/login' || route === '/api/logout';
     if (!read && !write) return json(res, 404, { error: 'not_found' });
     if (req.method !== (read ? 'GET' : 'POST')) {
       res.setHeader('Allow', read ? 'GET' : 'POST');
@@ -167,8 +170,18 @@ export function createAuthMiddleware() {
       if (access && (!isEmrAction(access) || !canPerformAction(staff.role, access))) {
         return json(res, 403, { error: 'forbidden' });
       }
+      if (catalog || catalogSearch) {
+        if (!canPerformAction(staff.role, catalog ? 'manage_catalog' : 'edit_soap')) {
+          return json(res, 403, { error: 'この操作を行う職種の権限がありません。' });
+        }
+        const params = new URLSearchParams(req.url?.split('?')[1]);
+        if (catalogSearch) return json(res, 200, searchCatalog(db, params));
+        if (read) return json(res, 200, listCatalogs(db));
+        return json(res, 200, saveCatalog(db, await receiveCatalog(req, params)));
+      }
       return json(res, 200, access ? { allowed: true } : { staff });
-    } catch {
+    } catch (error) {
+      if (error instanceof CatalogError) return json(res, error.status, { error: error.message });
       return json(res, 503, { error: 'database_unavailable' });
     } finally {
       db?.close();
