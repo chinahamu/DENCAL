@@ -27,6 +27,7 @@ HOST = "127.0.0.1"
 SCHEMA_VERSION = 6
 PATIENT_REGISTRATION_ROLE = "reception"
 PATIENT_SEARCH_ROLE = "reception"
+OUTPATIENT_VIEW_ROLES = {"reception", "physician"}
 TRIAL_TARGET_ID = "demo-patient-001"
 AUDIT_OUTCOMES = {"success": "成功", "denied": "拒否", "failed": "失敗"}
 TRIAL_OPERATIONS = {
@@ -127,6 +128,9 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         if self.path == "/login":
             self.send_login()
             return
+        if self.path == "/outpatient/list":
+            self.show_outpatient_list()
+            return
         if self.path == "/patients/search":
             self.show_patient_search()
             return
@@ -166,6 +170,8 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             links += '<li><a href="/patients/new">患者登録</a></li>'
         if role == PATIENT_SEARCH_ROLE:
             links += '<li><a href="/patients/search">患者検索</a></li>'
+        if role in OUTPATIENT_VIEW_ROLES:
+            links += '<li><a href="/outpatient/list">外来受付一覧</a></li>'
         if role == "admin":
             links += '<li><a href="/audit">監査ログ</a></li>'
         trial_menu = f"<ul>{links}</ul>" if links else "<p>利用できる試作用操作はありません。</p>"
@@ -637,19 +643,185 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         else:
             self.send_patient_search(status, message=message)
 
+    def show_outpatient_list(self):
+        try:
+            with closing(self.open_readonly_database()) as connection:
+                staff = self.current_staff(connection)
+        except sqlite3.Error as error:
+            self.database_error(error)
+            return
+        if staff is None:
+            self.redirect("/login")
+        elif staff[1] not in OUTPATIENT_VIEW_ROLES:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>外来受付を閲覧する権限がありません。</p>")
+        else:
+            self.send_outpatient_list(date.today().isoformat())
+
+    def send_outpatient_list(
+        self, visit_date, *, department="", visits=(), has_next=False,
+        message="", status=HTTPStatus.OK,
+    ):
+        options = []
+        for code, label in outpatient.DEPARTMENTS.items():
+            selected = " selected" if code == department else ""
+            options.append(f'<option value="{code}"{selected}>{label}</option>')
+        rows = []
+        for visit_id, patient_id, name, birth_date in visits:
+            number = patients.patient_number(patient_id)
+            rows.append(f"""
+                <tr><td>{visit_id}</td><td>{number}</td><td>{escape(name)}</td>
+                <td>{escape(birth_date)}</td><td>
+                  <form action="/outpatient/visit" method="post">
+                    <input type="hidden" name="department" value="{department}">
+                    <input type="hidden" name="visit_date" value="{visit_date}">
+                    <button name="visit_id" value="{visit_id}" aria-label="受診ID {visit_id} を開く">開く</button>
+                  </form>
+                </td></tr>
+            """)
+        table = ""
+        if rows:
+            table = f"""
+                <div class="table-scroll"><table>
+                  <caption>{outpatient.DEPARTMENTS[department]}の受付</caption>
+                  <thead><tr><th scope="col">受診ID</th><th scope="col">患者番号</th>
+                    <th scope="col">氏名</th><th scope="col">生年月日</th><th scope="col">受診</th></tr></thead>
+                  <tbody>{"".join(rows)}</tbody>
+                </table></div>
+            """
+        next_page = ""
+        if has_next:
+            next_page = f"""
+                <form action="/outpatient/list" method="post">
+                  <input type="hidden" name="department" value="{department}">
+                  <input type="hidden" name="visit_date" value="{visit_date}">
+                  <button name="after_id" value="{visits[-1][0]}">次の{outpatient.PAGE_SIZE}件</button>
+                </form>
+            """
+        self.send_page(status, f"""
+            <section aria-labelledby="outpatient-list-heading">
+              <h2 id="outpatient-list-heading">当日の外来受付一覧</h2>
+              <p>来院日　{visit_date}</p>
+              <form action="/outpatient/list" method="post">
+                <label>診療科 <select name="department" required>
+                  <option value="">選択してください</option>{"".join(options)}
+                </select></label>
+                <button>表示する</button>
+              </form>
+              <p role="status">{escape(message)}</p>
+              {table}
+              {next_page}
+              <p><a href="/">職員画面に戻る</a></p>
+            </section>
+        """)
+
+    def submit_outpatient_lookup(self, *, detail):
+        today = date.today().isoformat()
+        action = "outpatient-visit-view" if detail else "outpatient-list"
+        department, cursor = "", 0
+        try:
+            fields = self.read_form(max_fields=3)
+            department, = fields["department"]
+            if department not in outpatient.DEPARTMENTS:
+                raise ValueError
+            cursor_field = "visit_id" if detail else "after_id"
+            if detail or cursor_field in fields:
+                visit_date, = fields["visit_date"]
+                cursor_text, = fields[cursor_field]
+                if fields.keys() != {"department", "visit_date", cursor_field} or visit_date != today:
+                    raise ValueError
+                cursor = outpatient.parse_visit_id(cursor_text)
+            elif fields.keys() != {"department"}:
+                raise ValueError
+            valid = True
+        except (KeyError, ValueError):
+            valid = False
+
+        visits = []
+        has_next = False
+        try:
+            with closing(auth.connect(self.server.database)) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                staff = self.current_staff(connection)
+                allowed = staff is not None and staff[1] in OUTPATIENT_VIEW_ROLES
+                if allowed and valid:
+                    if detail:
+                        visit = outpatient.find_visit(connection, department, today, cursor)
+                        visits = [visit] if visit else []
+                    else:
+                        visits = outpatient.list_visits(connection, department, today, cursor)
+                        has_next = len(visits) > outpatient.PAGE_SIZE
+                        visits = visits[:outpatient.PAGE_SIZE]
+                if visits:
+                    for visit_id, _, _, _ in visits:
+                        audit.record_event(
+                            connection, actor_id=staff[0], target_id=f"visit:{visit_id}",
+                            action=action, outcome="success",
+                        )
+                else:
+                    outcome = "denied" if not allowed else "success" if valid and not detail else "failed"
+                    audit.record_event(
+                        connection, actor_id=staff[0] if staff else None,
+                        target_id=action, action=action, outcome=outcome,
+                    )
+        except sqlite3.Error as error:
+            self.database_error(error)
+            return
+
+        if staff is None:
+            self.redirect("/login")
+        elif not allowed:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>外来受付を閲覧する権限がありません。</p>")
+        elif not valid:
+            self.send_outpatient_list(
+                today, message="診療科と当日の受付を選び直してください。", status=HTTPStatus.BAD_REQUEST,
+            )
+        elif detail and visits:
+            self.send_outpatient_visit(today, department, visits[0])
+        else:
+            self.send_outpatient_list(
+                today, department=department, visits=visits, has_next=has_next,
+                message="" if visits else "該当する外来受付がありません。",
+                status=HTTPStatus.NOT_FOUND if detail else HTTPStatus.OK,
+            )
+
+    def send_outpatient_visit(self, visit_date, department, visit):
+        visit_id, patient_id, name, birth_date = visit
+        self.send_page(HTTPStatus.OK, f"""
+            <section aria-labelledby="outpatient-visit-heading">
+              <h2 id="outpatient-visit-heading">外来受診の確認</h2>
+              <dl>
+                <dt>受診ID</dt><dd>{visit_id}</dd>
+                <dt>患者番号</dt><dd>{patients.patient_number(patient_id)}</dd>
+                <dt>氏名</dt><dd>{escape(name)}</dd>
+                <dt>生年月日</dt><dd>{escape(birth_date)}</dd>
+                <dt>診療科</dt><dd>{outpatient.DEPARTMENTS[department]}</dd>
+                <dt>来院日</dt><dd>{visit_date}</dd>
+              </dl>
+              <form action="/outpatient/list" method="post">
+                <button name="department" value="{department}">同じ診療科の一覧に戻る</button>
+              </form>
+            </section>
+        """)
+
     def do_POST(self):
         if not self.is_local_request():
             return
         prefix, _, operation = self.path.rpartition("/")
         is_trial = prefix == "/api/trial" and operation in TRIAL_OPERATIONS
         is_patient_lookup = self.path in ("/patients/search", "/patients/confirm")
-        if self.path not in ("/login", "/logout", "/patients/new", "/outpatient/check-in") and not (is_trial or is_patient_lookup):
+        is_outpatient_lookup = self.path in ("/outpatient/list", "/outpatient/visit")
+        if self.path not in ("/login", "/logout", "/patients/new", "/outpatient/check-in") and not (
+            is_trial or is_patient_lookup or is_outpatient_lookup
+        ):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if self.headers.get_all("Origin") != [self.server.origin]:
             self.send_error(HTTPStatus.FORBIDDEN)
             return
 
+        if is_outpatient_lookup:
+            self.submit_outpatient_lookup(detail=self.path == "/outpatient/visit")
+            return
         if self.path == "/outpatient/check-in":
             self.submit_outpatient_check_in()
             return
