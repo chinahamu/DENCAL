@@ -12,17 +12,18 @@
     section { background: #fff; border: 1px solid #d5dee8; }
     h1 { margin-bottom: 0.5rem; }
     h2 { margin: 0 0 0.5rem; font-size: 1.2rem; }
-    section p { margin: 0; overflow-wrap: anywhere; }
+    section p { margin: 0 0 0.5rem; overflow-wrap: anywhere; }
+    form { display: grid; gap: 0.75rem; }
+    label { display: grid; gap: 0.25rem; }
+    input, button { font: inherit; padding: 0.5rem; }
+    button { justify-self: start; }
   </style>
 </head>
 <body>
   <main>
     <h1>DENCAL 試作版</h1>
     <p class="notice"><strong>実務利用不可。</strong> 動作確認には架空データのみを使用してください。</p>
-    <section aria-labelledby="database-heading">
-      <h2 id="database-heading">データベースの状態</h2>
-      <p>{{database_status}}</p>
-    </section>
+    {{content}}
   </main>
 </body>
 </html>
