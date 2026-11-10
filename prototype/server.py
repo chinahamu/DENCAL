@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 from threading import Lock
 from time import monotonic
@@ -17,10 +18,12 @@ from urllib.parse import parse_qs
 
 import audit
 import auth
+import patients
 
 
 HOST = "127.0.0.1"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+PATIENT_REGISTRATION_ROLE = "reception"
 TRIAL_TARGET_ID = "demo-patient-001"
 AUDIT_OUTCOMES = {"success": "成功", "denied": "拒否", "failed": "失敗"}
 TRIAL_OPERATIONS = {
@@ -89,6 +92,9 @@ def initialize_database(path):
             version = 3
         if version == 3:
             audit.initialize_audit_log(connection)
+            version = 4
+        if version == 4:
+            patients.initialize_patients(connection)
             connection.execute(
                 "UPDATE prototype_metadata SET schema_version = ? WHERE id = 1",
                 (SCHEMA_VERSION,),
@@ -114,6 +120,9 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/login":
             self.send_login()
+            return
+        if self.path == "/patients/new":
+            self.show_patient_registration()
             return
         if self.path in ("/audit", "/api/audit"):
             self.show_audit_log(api=self.path == "/api/audit")
@@ -144,6 +153,8 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             for name, (allowed_role, title) in TRIAL_OPERATIONS.items()
             if allowed_role == role
         )
+        if role == PATIENT_REGISTRATION_ROLE:
+            links += '<li><a href="/patients/new">患者登録</a></li>'
         if role == "admin":
             links += '<li><a href="/audit">監査ログ</a></li>'
         trial_menu = f"<ul>{links}</ul>" if links else "<p>利用できる試作用操作はありません。</p>"
@@ -274,18 +285,121 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             </section>
         """)
 
+    def show_patient_registration(self):
+        try:
+            with closing(self.open_readonly_database()) as connection:
+                staff = self.current_staff(connection)
+        except sqlite3.Error as error:
+            self.database_error(error)
+            return
+        if staff is None:
+            self.redirect("/login")
+        elif staff[1] != PATIENT_REGISTRATION_ROLE:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>患者を登録する権限がありません。</p>")
+        else:
+            self.send_patient_form()
+
+    def send_patient_form(self, status=HTTPStatus.OK, *, message="", name="", birth_date="", key=""):
+        if not patients.REQUEST_KEY.fullmatch(key):
+            key = secrets.token_urlsafe(32)
+        self.send_page(status, f"""
+            <section aria-labelledby="registration-heading">
+              <h2 id="registration-heading">患者登録</h2>
+              <p role="status">{escape(message)}</p>
+              <form action="/patients/new" method="post" autocomplete="off">
+                <input type="hidden" name="registration_key" value="{key}">
+                <label>氏名 <input name="name" required maxlength="100" value="{escape(name)}"></label>
+                <label>生年月日 <input type="date" name="birth_date" required value="{escape(birth_date)}"></label>
+                <button>登録する</button>
+              </form>
+              <p><a href="/">職員画面に戻る</a></p>
+            </section>
+        """)
+
+    def submit_patient_registration(self):
+        name, birth_date, key = "", "", ""
+        try:
+            fields = self.read_form(max_fields=3)
+            name, = fields["name"]
+            birth_date, = fields["birth_date"]
+            key, = fields["registration_key"]
+        except (KeyError, ValueError):
+            error_message = "氏名と生年月日を入力してください。"
+        else:
+            try:
+                name, birth_date = patients.validate_registration(name, birth_date, key)
+                error_message = ""
+            except ValueError as error:
+                error_message = str(error)
+
+        status = HTTPStatus.BAD_REQUEST
+        patient_number = None
+        try:
+            with closing(auth.connect(self.server.database)) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                staff = self.current_staff(connection)
+                if staff is None or staff[1] != PATIENT_REGISTRATION_ROLE:
+                    self.record_patient_registration(connection, staff, "denied")
+                elif error_message:
+                    self.record_patient_registration(connection, staff, "failed")
+                else:
+                    try:
+                        patient_number, created = patients.register(
+                            connection, name=name, birth_date=birth_date,
+                            actor_id=staff[0], registration_key=key,
+                        )
+                    except patients.RegistrationConflict:
+                        self.record_patient_registration(connection, staff, "failed")
+                        status = HTTPStatus.CONFLICT
+                        key = ""
+                        error_message = "送信済みの登録内容と一致しません。新しい登録として入力内容を確認してください。"
+                    else:
+                        if created:
+                            self.record_patient_registration(connection, staff, "success", patient_number)
+                        status = HTTPStatus.CREATED if created else HTTPStatus.OK
+        except sqlite3.Error as error:
+            self.database_error(error)
+            return
+
+        if staff is None:
+            self.redirect("/login")
+        elif staff[1] != PATIENT_REGISTRATION_ROLE:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>患者を登録する権限がありません。</p>")
+        elif error_message:
+            self.send_patient_form(status, message=error_message, name=name, birth_date=birth_date, key=key)
+        else:
+            self.send_page(status, f"""
+                <section aria-labelledby="registered-heading">
+                  <h2 id="registered-heading">患者登録済み</h2>
+                  <p>患者番号　{patient_number}</p>
+                  <p>氏名　{escape(name)}</p>
+                  <p>生年月日　{birth_date}</p>
+                  <p><a href="/patients/new">別の患者を登録する</a></p>
+                  <p><a href="/">職員画面に戻る</a></p>
+                </section>
+            """)
+
+    def record_patient_registration(self, connection, staff, outcome, target_id="patient-registration"):
+        audit.record_event(
+            connection, actor_id=staff[0] if staff else None,
+            target_id=target_id, action="patient-register", outcome=outcome,
+        )
+
     def do_POST(self):
         if not self.is_local_request():
             return
         prefix, _, operation = self.path.rpartition("/")
         is_trial = prefix == "/api/trial" and operation in TRIAL_OPERATIONS
-        if self.path not in ("/login", "/logout") and not is_trial:
+        if self.path not in ("/login", "/logout", "/patients/new") and not is_trial:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if self.headers.get_all("Origin") != [self.server.origin]:
             self.send_error(HTTPStatus.FORBIDDEN)
             return
 
+        if self.path == "/patients/new":
+            self.submit_patient_registration()
+            return
         if is_trial:
             self.execute_trial(operation)
             return
@@ -315,16 +429,19 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         token = cookie[SESSION_COOKIE].value if SESSION_COOKIE in cookie else ""
         return token if SESSION_TOKEN.fullmatch(token) else None
 
+    def read_form(self, *, max_fields):
+        length = int(self.headers.get("Content-Length", "0"))
+        if not 0 < length <= 4096:
+            raise ValueError
+        if self.headers.get_content_type() != "application/x-www-form-urlencoded":
+            raise ValueError
+        return parse_qs(
+            self.rfile.read(length).decode("ascii"), errors="strict", max_num_fields=max_fields
+        )
+
     def login(self):
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 4096:
-                raise ValueError
-            if self.headers.get_content_type() != "application/x-www-form-urlencoded":
-                raise ValueError
-            fields = parse_qs(
-                self.rfile.read(length).decode("ascii"), errors="strict", max_num_fields=2
-            )
+            fields = self.read_form(max_fields=2)
             staff_id, = fields["staff_id"]
             password, = fields["password"]
         except (KeyError, ValueError):
