@@ -8,9 +8,11 @@ from outpatient import form_signature
 
 
 MAX_DRAFT_LENGTH = 2000
+MAX_REASON_LENGTH = 500
 ACTION = "clinical-note-draft-save"
 REVIEW_ACTION = "clinical-note-finalize-review"
 FINALIZE_ACTION = "clinical-note-finalize"
+CORRECTION_ACTION = "clinical-note-correct"
 
 
 class Draft(NamedTuple):
@@ -56,14 +58,14 @@ def read_draft(connection, visit_id):
     return Draft(*row) if row is not None else None
 
 
-def draft_key(connection, visit_id, patient_id, version, actor_id, *, finalize=False):
-    scope = "clinical-note-finalize" if finalize else "clinical-note"
+def draft_key(connection, visit_id, patient_id, version, actor_id, *, action=ACTION):
+    scope = action if action in (FINALIZE_ACTION, CORRECTION_ACTION) else "clinical-note"
     return form_signature(connection, f"{scope}:{visit_id}:{version}", patient_id, actor_id)
 
 
-def valid_key(connection, key, visit_id, patient_id, version, actor_id, *, finalize=False):
+def valid_key(connection, key, visit_id, patient_id, version, actor_id, *, action=ACTION):
     return len(key) == 64 and key.isascii() and compare_digest(
-        key, draft_key(connection, visit_id, patient_id, version, actor_id, finalize=finalize)
+        key, draft_key(connection, visit_id, patient_id, version, actor_id, action=action)
     )
 
 
@@ -101,3 +103,54 @@ def finalize_draft(connection, visit_id, version, actor_id):
         (actor_id, visit_id, version),
     )
     return result.rowcount == 1
+
+class Correction(NamedTuple):
+    revision: int
+    body: str
+    reason: str
+    corrected_by: str
+    corrected_at: str
+
+
+def initialize_corrections(connection):
+    connection.execute(
+        """
+        CREATE TABLE clinical_note_corrections (
+            visit_id INTEGER NOT NULL REFERENCES clinical_note_drafts(visit_id),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            body TEXT NOT NULL,
+            reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+            corrected_by TEXT NOT NULL,
+            corrected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            PRIMARY KEY (visit_id, revision)
+        )
+        """
+    )
+
+
+def read_corrections(connection, visit_id):
+    return [
+        Correction(*row)
+        for row in connection.execute(
+            """SELECT revision, body, reason, corrected_by, corrected_at
+            FROM clinical_note_corrections WHERE visit_id = ? ORDER BY revision DESC""",
+            (visit_id,),
+        )
+    ]
+
+
+def validate_reason(reason):
+    reason = reason.strip()
+    if not 1 <= len(reason) <= MAX_REASON_LENGTH:
+        raise ValueError(f"訂正理由を1〜{MAX_REASON_LENGTH}文字で入力してください。")
+    if any(category(char) == "Cc" for char in reason):
+        raise ValueError("訂正理由に使用できない制御文字が含まれています。")
+    return reason
+
+
+def append_correction(connection, visit_id, revision, body, reason, actor_id):
+    connection.execute(
+        """INSERT INTO clinical_note_corrections (visit_id, revision, body, reason, corrected_by)
+        VALUES (?, ?, ?, ?, ?)""",
+        (visit_id, revision, body, reason, actor_id),
+    )
