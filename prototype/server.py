@@ -19,12 +19,13 @@ from urllib.parse import parse_qs
 
 import audit
 import auth
+import clinical_notes
 import outpatient
 import patients
 
 
 HOST = "127.0.0.1"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 PATIENT_REGISTRATION_ROLE = "reception"
 PATIENT_SEARCH_ROLE = "reception"
 OUTPATIENT_VIEW_ROLES = {"reception", "physician"}
@@ -102,6 +103,9 @@ def initialize_database(path):
             version = 5
         if version == 5:
             outpatient.initialize_outpatient(connection)
+            version = 6
+        if version == 6:
+            clinical_notes.initialize_drafts(connection)
             connection.execute(
                 "UPDATE prototype_metadata SET schema_version = ? WHERE id = 1",
                 (SCHEMA_VERSION,),
@@ -738,6 +742,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
 
         visits = []
         has_next = False
+        editor = ""
         try:
             with closing(auth.connect(self.server.database)) as connection, connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -747,6 +752,10 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                     if detail:
                         visit = outpatient.find_visit(connection, department, today, cursor)
                         visits = [visit] if visit else []
+                        if visit and staff[1] == "physician":
+                            body, version = clinical_notes.read_draft(connection, visit[0])
+                            key = clinical_notes.draft_key(connection, visit[0], visit[1], version, staff[0])
+                            editor = self.draft_form(today, department, visit, body, version, key)
                     else:
                         visits = outpatient.list_visits(connection, department, today, cursor)
                         has_next = len(visits) > outpatient.PAGE_SIZE
@@ -776,7 +785,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                 today, message="診療科と当日の受付を選び直してください。", status=HTTPStatus.BAD_REQUEST,
             )
         elif detail and visits:
-            self.send_outpatient_visit(today, department, visits[0])
+            self.send_outpatient_visit(today, department, visits[0], editor=editor)
         else:
             self.send_outpatient_list(
                 today, department=department, visits=visits, has_next=has_next,
@@ -784,9 +793,9 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.NOT_FOUND if detail else HTTPStatus.OK,
             )
 
-    def send_outpatient_visit(self, visit_date, department, visit):
+    def send_outpatient_visit(self, visit_date, department, visit, *, editor="", status=HTTPStatus.OK):
         visit_id, patient_id, name, birth_date = visit
-        self.send_page(HTTPStatus.OK, f"""
+        self.send_page(status, f"""
             <section aria-labelledby="outpatient-visit-heading">
               <h2 id="outpatient-visit-heading">外来受診の確認</h2>
               <dl>
@@ -797,11 +806,110 @@ class PrototypeHandler(BaseHTTPRequestHandler):
                 <dt>診療科</dt><dd>{outpatient.DEPARTMENTS[department]}</dd>
                 <dt>来院日</dt><dd>{visit_date}</dd>
               </dl>
+              {editor}
               <form action="/outpatient/list" method="post">
                 <button name="department" value="{department}">同じ診療科の一覧に戻る</button>
               </form>
             </section>
         """)
+
+    def draft_form(self, visit_date, department, visit, body, version, key, message=""):
+        visit_id, patient_id, _, _ = visit
+        return f"""
+            <h3>診療録の下書き</h3>
+            <p role="status">{escape(message)}</p>
+            <form action="/outpatient/draft" method="post" autocomplete="off">
+              <input type="hidden" name="visit_id" value="{visit_id}">
+              <input type="hidden" name="patient_number" value="{patients.patient_number(patient_id)}">
+              <input type="hidden" name="department" value="{department}">
+              <input type="hidden" name="visit_date" value="{visit_date}">
+              <input type="hidden" name="version" value="{version}">
+              <input type="hidden" name="draft_key" value="{key}">
+              <label>下書き本文 <textarea name="body" rows="8" required maxlength="{clinical_notes.MAX_DRAFT_LENGTH}">
+{escape(body)}</textarea></label>
+              <button>下書きを保存する</button>
+            </form>
+        """
+
+    def submit_clinical_draft(self):
+        today = date.today().isoformat()
+        try:
+            fields = self.read_form(max_fields=7, max_bytes=32768, keep_blank_values=True)
+            department, = fields["department"]
+            visit_date, = fields["visit_date"]
+            number, = fields["patient_number"]
+            visit_text, = fields["visit_id"]
+            version_text, = fields["version"]
+            key, = fields["draft_key"]
+            body, = fields["body"]
+            visit_id = outpatient.parse_visit_id(visit_text)
+            patient_id, _, _ = patients.search_criteria(number, "", "")
+            version = 0 if version_text == "0" else outpatient.parse_visit_id(version_text)
+            valid = patient_id is not None and department in outpatient.DEPARTMENTS and visit_date == today
+        except (KeyError, ValueError):
+            valid = False
+
+        status = HTTPStatus.BAD_REQUEST
+        message = "患者と受診を選び直してください。"
+        confirmed_visit = None
+        try:
+            with closing(auth.connect(self.server.database)) as connection, connection:
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("BEGIN IMMEDIATE")
+                staff = self.current_staff(connection)
+                allowed = staff is not None and staff[1] == "physician"
+                if allowed and valid:
+                    visit = outpatient.find_visit(connection, department, today, visit_id)
+                    if visit and visit[1] == patient_id and clinical_notes.valid_key(
+                        connection, key, visit_id, patient_id, version, staff[0],
+                    ):
+                        confirmed_visit = visit
+                        try:
+                            body = clinical_notes.validate_body(body)
+                        except ValueError as error:
+                            message = str(error)
+                        else:
+                            if clinical_notes.save_draft(connection, visit_id, body, version, staff[0]):
+                                status = HTTPStatus.OK
+                                message = "下書きを保存しました。"
+                                version += 1
+                                key = clinical_notes.draft_key(connection, visit_id, patient_id, version, staff[0])
+                            else:
+                                status = HTTPStatus.CONFLICT
+                                message = "別の画面で下書きが更新されたため、保存しませんでした。最新の下書きを開き直してください。"
+
+                outcome = "denied" if not allowed else "success" if status == HTTPStatus.OK else "failed"
+                audit.record_event(
+                    connection, actor_id=staff[0] if staff else None,
+                    target_id=f"visit:{visit_id}" if confirmed_visit else clinical_notes.ACTION,
+                    action=clinical_notes.ACTION, outcome=outcome,
+                )
+        except sqlite3.Error as error:
+            self.database_error(error)
+            return
+
+        if staff is None:
+            self.redirect("/login")
+        elif not allowed:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>診療録を保存する権限がありません。</p>")
+        elif confirmed_visit is None:
+            self.send_outpatient_list(today, status=status, message=message)
+        else:
+            if status == HTTPStatus.CONFLICT:
+                editor = f"""
+                    <h3>診療録の下書き</h3>
+                    <p role="alert">{escape(message)}</p>
+                    <label>保存されなかった入力 <textarea rows="8" readonly>
+{escape(body)}</textarea></label>
+                    <form action="/outpatient/visit" method="post">
+                      <input type="hidden" name="department" value="{department}">
+                      <input type="hidden" name="visit_date" value="{today}">
+                      <button name="visit_id" value="{visit_id}">最新の下書きを開く</button>
+                    </form>
+                """
+            else:
+                editor = self.draft_form(today, department, confirmed_visit, body, version, key, message)
+            self.send_outpatient_visit(today, department, confirmed_visit, editor=editor, status=status)
 
     def do_POST(self):
         if not self.is_local_request():
@@ -810,7 +918,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         is_trial = prefix == "/api/trial" and operation in TRIAL_OPERATIONS
         is_patient_lookup = self.path in ("/patients/search", "/patients/confirm")
         is_outpatient_lookup = self.path in ("/outpatient/list", "/outpatient/visit")
-        if self.path not in ("/login", "/logout", "/patients/new", "/outpatient/check-in") and not (
+        if self.path not in ("/login", "/logout", "/patients/new", "/outpatient/check-in", "/outpatient/draft") and not (
             is_trial or is_patient_lookup or is_outpatient_lookup
         ):
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -819,6 +927,9 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN)
             return
 
+        if self.path == "/outpatient/draft":
+            self.submit_clinical_draft()
+            return
         if is_outpatient_lookup:
             self.submit_outpatient_lookup(detail=self.path == "/outpatient/visit")
             return
@@ -860,14 +971,15 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         token = cookie[SESSION_COOKIE].value if SESSION_COOKIE in cookie else ""
         return token if SESSION_TOKEN.fullmatch(token) else None
 
-    def read_form(self, *, max_fields):
+    def read_form(self, *, max_fields, max_bytes=4096, keep_blank_values=False):
         length = int(self.headers.get("Content-Length", "0"))
-        if not 0 < length <= 4096:
+        if not 0 < length <= max_bytes:
             raise ValueError
         if self.headers.get_content_type() != "application/x-www-form-urlencoded":
             raise ValueError
         return parse_qs(
-            self.rfile.read(length).decode("ascii"), errors="strict", max_num_fields=max_fields
+            self.rfile.read(length).decode("ascii"), errors="strict", max_num_fields=max_fields,
+            keep_blank_values=keep_blank_values,
         )
 
     def login(self):
