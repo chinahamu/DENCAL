@@ -15,11 +15,14 @@ from threading import Lock
 from time import monotonic
 from urllib.parse import parse_qs
 
+import audit
 import auth
 
 
 HOST = "127.0.0.1"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+TRIAL_TARGET_ID = "demo-patient-001"
+AUDIT_OUTCOMES = {"success": "成功", "denied": "拒否", "failed": "失敗"}
 TRIAL_OPERATIONS = {
     "reception-preview": ("reception", "受付の試行"),
     "consultation-preview": ("physician", "診察の試行"),
@@ -83,6 +86,9 @@ def initialize_database(path):
             version = 2
         if version == 2:
             auth.initialize_staff_roles(connection)
+            version = 3
+        if version == 3:
+            audit.initialize_audit_log(connection)
             connection.execute(
                 "UPDATE prototype_metadata SET schema_version = ? WHERE id = 1",
                 (SCHEMA_VERSION,),
@@ -108,6 +114,9 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/login":
             self.send_login()
+            return
+        if self.path in ("/audit", "/api/audit"):
+            self.show_audit_log(api=self.path == "/api/audit")
             return
         if self.path != "/":
             prefix, _, operation = self.path.rpartition("/")
@@ -135,6 +144,8 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             for name, (allowed_role, title) in TRIAL_OPERATIONS.items()
             if allowed_role == role
         )
+        if role == "admin":
+            links += '<li><a href="/audit">監査ログ</a></li>'
         trial_menu = f"<ul>{links}</ul>" if links else "<p>利用できる試作用操作はありません。</p>"
         self.send_page(HTTPStatus.OK, f"""
             <section aria-labelledby="database-heading">
@@ -155,17 +166,69 @@ class PrototypeHandler(BaseHTTPRequestHandler):
         token = self.session_token()
         return auth.session_staff(connection, token) if token else None
 
-    def handle_trial(self, operation, *, api=False):
+    def handle_trial(self, operation):
         required_role, title = TRIAL_OPERATIONS[operation]
         try:
             with closing(self.open_readonly_database()) as connection:
                 staff = self.current_staff(connection)
         except sqlite3.Error as error:
-            self.log_error("職種の読み取りエラー: %s", error)
+            self.database_error(error)
+            return
+
+        if staff is None:
+            self.redirect("/login")
+            return
+        if staff[1] != required_role:
+            self.send_page(HTTPStatus.FORBIDDEN, "<p>この操作を行う権限がありません。</p>")
+            return
+
+        self.send_page(HTTPStatus.OK, f"""
+            <section>
+              <h2>{title}</h2>
+              <p>架空の対象ID　{TRIAL_TARGET_ID}</p>
+              <form action="/api/trial/{operation}" method="post"><button>試行する</button></form>
+              <p><a href="/">職員画面に戻る</a></p>
+            </section>
+        """)
+
+    def execute_trial(self, operation):
+        required_role, _ = TRIAL_OPERATIONS[operation]
+        try:
+            with closing(auth.connect(self.server.database)) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                staff = self.current_staff(connection)
+                allowed = staff is not None and staff[1] == required_role
+                audit.record_event(
+                    connection,
+                    actor_id=staff[0] if staff else None,
+                    target_id=TRIAL_TARGET_ID,
+                    action=operation,
+                    outcome="success" if allowed else "denied",
+                )
+        except sqlite3.Error as error:
+            self.log_error("監査イベント記録エラー: %s", error)
+            self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "database_unavailable"})
+            return
+
+        if staff is None:
+            self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "login_required"})
+        elif not allowed:
+            self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        else:
+            self.send_json(HTTPStatus.OK, {"operation": operation, "result": "allowed"})
+
+    def show_audit_log(self, *, api):
+        try:
+            with closing(self.open_readonly_database()) as connection:
+                connection.execute("BEGIN")
+                staff = self.current_staff(connection)
+                events = audit.recent_events(connection) if staff and staff[1] == "admin" else None
+        except sqlite3.Error as error:
             if api:
+                self.log_error("監査ログ読み取りエラー: %s", error)
                 self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "database_unavailable"})
             else:
-                self.send_page(HTTPStatus.SERVICE_UNAVAILABLE, "<p>データベースを利用できません。</p>")
+                self.database_error(error)
             return
 
         if staff is None:
@@ -174,23 +237,39 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             else:
                 self.redirect("/login")
             return
-
-        if staff[1] != required_role:
+        if events is None:
             if api:
                 self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
             else:
-                self.send_page(HTTPStatus.FORBIDDEN, "<p>この操作を行う権限がありません。</p>")
+                self.send_page(HTTPStatus.FORBIDDEN, "<p>監査ログを閲覧する権限がありません。</p>")
             return
 
         if api:
-            self.send_json(HTTPStatus.OK, {"operation": operation, "result": "allowed"})
+            self.send_json(HTTPStatus.OK, {"events": events})
             return
-
+        rows = []
+        for event in events:
+            values = (
+                event["occurred_at"], event["actor_id"] or "未認証", event["target_id"],
+                event["action"], AUDIT_OUTCOMES[event["outcome"]],
+            )
+            cells = "".join(f"<td>{escape(value)}</td>" for value in values)
+            rows.append(f"<tr>{cells}</tr>")
+        if not rows:
+            rows.append('<tr><td colspan="5">監査イベントはまだありません。</td></tr>')
         self.send_page(HTTPStatus.OK, f"""
-            <section>
-              <h2>{title}</h2>
-              <p>職種別の操作権限を確認できます。</p>
-              <form action="/api/trial/{operation}" method="post"><button>試行する</button></form>
+            <section aria-labelledby="audit-heading">
+              <h2 id="audit-heading">監査ログ</h2>
+              <p>新しい順に最大{audit.RECENT_LIMIT}件を表示します。</p>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr>
+                    <th scope="col">時刻（UTC）</th><th scope="col">操作者ID</th><th scope="col">対象ID</th>
+                    <th scope="col">操作</th><th scope="col">結果</th>
+                  </tr></thead>
+                  <tbody>{"".join(rows)}</tbody>
+                </table>
+              </div>
               <p><a href="/">職員画面に戻る</a></p>
             </section>
         """)
@@ -208,7 +287,7 @@ class PrototypeHandler(BaseHTTPRequestHandler):
             return
 
         if is_trial:
-            self.handle_trial(operation, api=True)
+            self.execute_trial(operation)
             return
 
         try:
