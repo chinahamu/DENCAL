@@ -15,6 +15,16 @@
     section p { margin: 0 0 0.5rem; overflow-wrap: anywhere; }
     form { display: grid; gap: 0.75rem; }
     label { display: grid; gap: 0.25rem; }
+    main:has(.clinical-workbench) { max-width: 75rem; }
+    .chart-context { background: #eef7f6; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1.25rem; }
+    .chart-context dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin-bottom: 0; }
+    .chart-context dd { margin: 0; }
+    .chart-name { font-size: 1.35rem; font-weight: 700; }
+    .soap-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem; }
+    .soap-field { padding: 0.75rem; background: #f5f8fb; border: 1px solid #d5dee8; border-radius: 0.4rem; }
+    .soap-field textarea { width: 100%; box-sizing: border-box; resize: vertical; }
+    .clinical-workbench form + form { margin-top: 0.75rem; }
+    @media (max-width: 700px) { .soap-grid { grid-template-columns: 1fr; } }
     input, button, textarea { font: inherit; padding: 0.5rem; }
     button { justify-self: start; }
     .table-scroll { overflow-x: auto; }
