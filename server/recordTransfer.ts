@@ -2,6 +2,7 @@ import { closeSync, fsyncSync, linkSync, lstatSync, mkdtempSync, openSync, rmSyn
 import { dirname, extname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
+import { verifyReceptOutbox } from './receptOutbox';
 import { CLINICAL_DB_VERSION, verifyClinicalStore } from './clinicalStore';
 
 const expectedTriggers = ['clinical_revision_no_update', 'clinical_revision_no_delete', 'clinical_revision_no_replace'];
@@ -12,8 +13,8 @@ function openDatabase(path: string, readOnly: boolean) {
   try {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA trusted_schema = OFF; PRAGMA foreign_keys = ON');
     const version = db.prepare('PRAGMA user_version').get()?.user_version;
-    if (version !== 4 && version !== CLINICAL_DB_VERSION) {
-      throw new Error(`診療録の保存に対応した DENCAL のDB（バージョン 4 または ${CLINICAL_DB_VERSION}）を指定してください。`);
+    if (version !== 4 && version !== 5 && version !== CLINICAL_DB_VERSION) {
+      throw new Error(`診療録の保存に対応した DENCAL のDB（バージョン 4〜${CLINICAL_DB_VERSION}）を指定してください。`);
     }
     return db;
   } catch (error) {
@@ -32,12 +33,14 @@ function verify(db: DatabaseSync) {
   if (!expectedTriggers.every((trigger) => triggers.includes(trigger))) {
     throw new Error('確定版を保護するトリガーがありません。');
   }
-  if (db.prepare('PRAGMA user_version').get()?.user_version === CLINICAL_DB_VERSION) {
+  if (Number(db.prepare('PRAGMA user_version').get()?.user_version) >= 5) {
     const signatures = db.prepare("SELECT count(*) AS total FROM sqlite_schema WHERE type = 'trigger' AND name IN ('clinical_signature_no_update', 'clinical_signature_no_delete', 'clinical_signature_no_replace')").get();
     if (signatures?.total !== 3) throw new Error('署名証跡を保護するトリガーがありません。');
   }
   try {
-    return verifyClinicalStore(db);
+    const count = verifyClinicalStore(db);
+    if (Number(db.prepare('PRAGMA user_version').get()?.user_version) >= 6) verifyReceptOutbox(db);
+    return count;
   } catch {
     throw new Error('診療録の構造または確定版のハッシュを検証できませんでした。');
   }

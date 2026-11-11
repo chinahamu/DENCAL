@@ -211,6 +211,11 @@ export interface AuditLogEntry {
   actorRole: UserRole;
   actionType:
     | 'RECORD_VIEW'
+    | 'PROCEDURE_PERFORMED'
+    | 'PROCEDURE_CANCELLED'
+    | 'RECEPT_QUEUED'
+    | 'RECEPT_SEND_ATTEMPT'
+    | 'RECEPT_SEND_RESULT'
     | 'SOAP_SAVE'
     | 'SOAP_CORRECTION_START'
     | 'SOAP_SIGN'

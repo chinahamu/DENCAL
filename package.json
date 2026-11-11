@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test src/utils/emrLogic.test.ts server/clinical.test.ts server/recordSigning.test.ts integration/recept-v1/contract.test.mjs",
+    "test": "node --import tsx --test src/utils/emrLogic.test.ts server/clinical.test.ts server/recordSigning.test.ts server/receptOutbox.test.ts integration/recept-v1/contract.test.mjs",
     "db:init": "python3 database/init.py",
     "records:export": "node --import tsx server/recordTransfer.ts export",
     "records:verify": "node --import tsx server/recordTransfer.ts verify",
@@ -16,6 +16,7 @@
     "test:integration": "node --test integration/recept-v1/contract.test.mjs"
   },
   "dependencies": {
+    "ajv": "8.18.0",
     "lucide-react": "^0.546.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
@@ -26,7 +27,6 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.4.1",
-    "ajv": "8.18.0",
     "tailwindcss": "^4.1.0",
     "tsx": "^4.20.0",
     "typescript": "~5.8.0",

@@ -5,6 +5,7 @@ import type { AuditLogEntry, PatientRecord, UserRole } from '../src/types/emr';
 import { canPerformAction, type EmrAction } from '../src/utils/permissions';
 import { allergy, ClinicalError, diagnosis, labOrder, object, prescription, registration, requiredText, soapPatch, vitals } from './clinicalInput';
 import { finalizedRecordDocument, searchFinalizedRecords } from './recordDocuments';
+import { addPerformance, beginReceptSend, cancelPerformance, completeReceptSend, queueRecept, receptWorkspace, type sendRecept } from './receptOutbox';
 import { INITIAL_AUDIT_LOGS, INITIAL_BACKUPS } from './clinicalSeed';
 import {
   findChart, findEncounterChart, finalizeDraft, prepareRevisionPayload, GENERAL_DEPARTMENT, insertChart, listCharts, saveDraft, saveWorkspace, startCorrection,
@@ -26,6 +27,12 @@ const operations = {
 } as const satisfies Record<string, EmrAction>;
 type Operation = keyof typeof operations;
 
+const receptActions = {
+  recept: 'view_chart', performance_add: 'record_performance', performance_cancel: 'record_performance',
+  recept_queue: 'send_recept', recept_send: 'send_recept',
+} as const satisfies Record<string, EmrAction>;
+type ReceptOperation = keyof typeof receptActions;
+
 type ClinicalRoute =
   | { kind: 'list'; method: 'GET'; action: 'view_chart' }
   | { kind: 'register'; method: 'POST'; action: 'register_patient' }
@@ -34,6 +41,7 @@ type ClinicalRoute =
   | { kind: 'record'; method: 'GET' | 'POST'; action: 'view_chart' | 'export_record'; encounterId: number; revision: number }
   | { kind: 'archive'; method: 'GET'; action: 'export_archive' }
   | { kind: 'admin'; method: 'GET'; action: 'view_audit' }
+  | { kind: 'recept'; method: 'GET' | 'POST'; action: EmrAction; patientId: string; operation: ReceptOperation }
   | { kind: 'patient'; method: 'GET'; action: 'view_chart'; patientId: string }
   | { kind: 'operation'; method: 'POST'; action: EmrAction; patientId: string; operation: Operation };
 
@@ -59,6 +67,10 @@ export function clinicalRoute(path: string, method: string | undefined): Clinica
   if (!match) return undefined;
   const [, patientId, operation] = match;
   if (!operation) return { kind: 'patient', method: 'GET', action: 'view_chart', patientId };
+  if (Object.hasOwn(receptActions, operation)) {
+    const key = operation as ReceptOperation;
+    return { kind: 'recept', method: key === 'recept' ? 'GET' : 'POST', action: receptActions[key], patientId, operation: key };
+  }
   if (Object.hasOwn(operations, operation)) {
     return { kind: 'operation', method: 'POST', action: operations[operation as Operation], patientId, operation: operation as Operation };
   }
@@ -236,6 +248,22 @@ function update(db: DatabaseSync, chart: Chart, actor: Actor, operation: Exclude
   return findChart(db, actor, patient.id).patient;
 }
 
+export function startReceptDelivery(db: DatabaseSync, actor: Actor, patientId: string, body: unknown) {
+  const chart = findChart(db, actor, patientId);
+  const attempt = beginReceptSend(db, chart, body);
+  if (attempt) audit(db, actor, 'RECEPT_SEND_ATTEMPT', `RECEPT送信開始 ${attempt.id}（${attempt.attempt}回目）`, chart);
+  return attempt;
+}
+
+export function finishReceptDelivery(db: DatabaseSync, actor: Actor, patientId: string,
+  attempt: NonNullable<ReturnType<typeof beginReceptSend>>, result: Awaited<ReturnType<typeof sendRecept>>) {
+  const chart = findChart(db, actor, patientId);
+  if (completeReceptSend(db, attempt, result)) {
+    audit(db, actor, 'RECEPT_SEND_RESULT', `RECEPT送信結果 ${attempt.id} ${result.receipt?.status ?? result.error}`, chart);
+  }
+  return receptWorkspace(db, chart);
+}
+
 export function handleClinical(db: DatabaseSync, route: Exclude<ClinicalRoute, { kind: 'signature_check' }>, actor: Actor, body: unknown, params: URLSearchParams, signed?: SignedFinalization) {
   if (!canPerformAction(actor.role, route.action)) throw new ClinicalError(403, 'forbidden');
   if (route.kind === 'list') return { patients: listCharts(db, actor) };
@@ -256,6 +284,23 @@ export function handleClinical(db: DatabaseSync, route: Exclude<ClinicalRoute, {
       patients: listCharts(db, actor), backupsCount: INITIAL_BACKUPS.length };
   }
   const chart = findChart(db, actor, route.patientId);
+  if (route.kind === 'recept') {
+    switch (route.operation) {
+      case 'performance_add':
+        if (addPerformance(db, chart, actor, body)) audit(db, actor, 'PROCEDURE_PERFORMED', '診療行為の実施を登録', chart);
+        break;
+      case 'performance_cancel':
+        if (cancelPerformance(db, chart, actor, body)) audit(db, actor, 'PROCEDURE_CANCELLED', '診療行為の実施記録を取消', chart);
+        break;
+      case 'recept_queue': {
+        const queued = queueRecept(db, chart, actor, body);
+        const workspace = receptWorkspace(db, chart);
+        if (queued) audit(db, actor, 'RECEPT_QUEUED', `RECEPT送信待ちに追加 ${workspace.outbox.at(-1)!.id}`, chart);
+        return workspace;
+      }
+    }
+    return receptWorkspace(db, chart);
+  }
   if (route.kind === 'patient') {
     audit(db, actor, 'RECORD_VIEW', '患者カルテを閲覧', chart);
     return { patient: chart.patient };

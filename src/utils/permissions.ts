@@ -6,6 +6,8 @@ const minimum = {
   register_patient: 'clerk',
   settle_billing: 'clerk',
   record_vitals: 'nurse',
+  record_performance: 'nurse',
+  send_recept: 'doctor',
   edit_soap: 'doctor',
   sign_soap: 'doctor',
   add_prescription: 'doctor',

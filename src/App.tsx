@@ -100,9 +100,27 @@ export default function App() {
     if (response.status === 401 && !signal.aborted) setStaff(null);
     if (!response.ok) {
       if (response.status === 403 || response.status === 404) throw new Error('対象の操作または患者へのアクセスが許可されていません。');
-      if (response.status === 400) throw new Error('入力内容を確認してください。');
-      if (response.status === 409 || response.status === 503) {
+      if ([400, 409, 503].includes(response.status)) {
         const { error } = await response.json();
+        const receptErrors: Record<string, string> = {
+          recept_performance_id_conflict: 'この登録IDは既に別の実施記録に使われています。画面を再読込してください。',
+          recept_performances_changed: '実施記録が更新されました。再読込して内容を確認してください。',
+          recept_procedure_master_required: '実施日に有効な外来・固定点数のマスターを選択してください。',
+          recept_procedure_unit_mismatch: '公式マスターの単位を確認してください。',
+          recept_diagnosis_master_required: '確定版に公式マスターで確認できない傷病名があります。',
+          recept_finalized_chart_required: '受診のカルテを確定してから送信待ちデータを作成してください。',
+          recept_performance_required: '初回の送信には実施済み行為が必要です。',
+          recept_performance_incomplete: '実施日または単位が未登録の実施記録があります。',
+          recept_encounter_cancelled: 'この受診は取消が送信待ちに登録されています。',
+          recept_no_prior_transfer: '初回の送信待ちデータがありません。',
+          recept_payload_invalid: '連携仕様v1の項目またはサイズ制限を確認してください。',
+          recept_outbox_integrity_error: '送信待ちデータの整合性を確認できませんでした。',
+          recept_transport_not_configured: 'サーバーのRECEPT送信先と認証設定を確認してください。',
+          recept_previous_unsent: '先行する連携版から送信してください。',
+          recept_send_in_progress: '送信中です。結果が返るまでお待ちください。',
+        };
+        if (Object.hasOwn(receptErrors, error)) throw new Error(receptErrors[error]);
+        if (response.status === 400) throw new Error('入力内容を確認してください。');
         if (error === 'signing_not_configured') throw new Error('署名証明書または検証設定を管理者に確認してください。');
         if (error === 'signing_failed') throw new Error('電子署名またはタイムスタンプに失敗しました。診療録は確定されていません。');
         if (error === 'signature_verification_failed') throw new Error('電子署名またはタイムスタンプの整合性・信頼性を確認できませんでした。');
@@ -551,6 +569,7 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
             patients={patients}
             selectedPatientId={selectedPatientId}
             currentStaff={currentStaff}
+            clinicalRequest={clinicalRequest}
             onSelectPatient={handleSelectPatient}
             onUpdateSoap={handleUpdateSoap}
             onSaveSoap={handleSaveSoap}

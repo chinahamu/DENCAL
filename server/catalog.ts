@@ -2,9 +2,13 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
+import { calendarDate } from './clinicalInput';
 import { catalogKinds, masterUploadLimit, type CatalogKind } from '../src/types/catalog';
 
 const source = 'MHLW-RECEIPT';
+// RECEPT's supported fixed-point outpatient categories in v1.
+const billingCategories = new Set(['110', '120', '122', '123', '124', '125', '130', '140', '210',
+  '230', '240', '250', '260', '270', '300', '311', '321', '331', '400', '600', '700', '800']);
 const formats = {
   b: { kind: 'diagnosis', columns: 46, code: /^\d{7}$/, extension: 'txt' },
   y: { kind: 'drug', columns: 42, code: /^6\d{8}$/, extension: 'csv' },
@@ -44,6 +48,7 @@ function parseRow(kind: CatalogKind, fields: string[]) {
   let effectiveFrom = '';
   let effectiveUntil = '';
   let selectable = false;
+  let performanceSelectable = false;
   if (kind === 'diagnosis') {
     name = fields[5].trim() || fields[7].trim();
     kana = fields[9];
@@ -65,16 +70,22 @@ function parseRow(kind: CatalogKind, fields: string[]) {
     kana = fields[6];
     effectiveFrom = date(fields[86]);
     effectiveUntil = date(fields[87]);
+    unit = fields[9].trim();
     selectable = active && fields[12] !== '1' && fields[14] === '600';
+    const points = Number(fields[11]);
+    performanceSelectable = active && change !== '9' && billingCategories.has(fields[14]) &&
+      fields[10] === '3' && fields[12] !== '1' && fields[15] === '0' && fields[29] === '0' &&
+      Number.isFinite(points) && points > 0 && points <= 100_000;
   }
   if (!name) throw new Error('name');
   const searchText = normal([code, name, kana, icd10, priceCode].join(' '));
   // Some discontinued rows have a change date later than their last usable date.
   if (effectiveUntil && effectiveFrom > effectiveUntil) {
     selectable = false;
+    performanceSelectable = false;
     effectiveFrom = '';
   }
-  return { code, name, searchText, icd10, unit, drugForm, priceCode, effectiveFrom, effectiveUntil, selectable };
+  return { code, name, searchText, icd10, unit, drugForm, priceCode, effectiveFrom, effectiveUntil, selectable, performanceSelectable };
 }
 
 function parseCatalog(format: typeof formats[keyof typeof formats], marker: string, bytes: Buffer) {
@@ -152,12 +163,24 @@ export function saveCatalog(db: DatabaseSync, input: Awaited<ReturnType<typeof r
         INSERT INTO master_items (kind, release_id, code_system, code, name, effective_from, effective_until)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
-      const details = db.prepare('INSERT INTO master_item_catalog_details VALUES (?, ?, ?, ?, ?, ?, ?)');
+      const details = db.prepare(`INSERT INTO master_item_catalog_details
+        (item_id, search_text, icd10, unit, drug_form, price_code, selectable, performance_selectable)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const row of rows) {
         const id = insert.run(kind, release.lastInsertRowid, 'レセ電算', row.code, row.name,
           row.effectiveFrom || '0001-01-01', row.effectiveUntil || null).lastInsertRowid;
-        details.run(id, row.searchText, row.icd10, row.unit, row.drugForm, row.priceCode, Number(row.selectable));
+        details.run(id, row.searchText, row.icd10, row.unit, row.drugForm, row.priceCode, Number(row.selectable), Number(row.performanceSelectable));
       }
+    }
+    if (!release.changes && kind === 'procedure') {
+      const refresh = db.prepare(`
+        UPDATE master_item_catalog_details SET performance_selectable = ?, unit = ?
+        WHERE performance_selectable IS NULL AND item_id = (
+          SELECT i.id FROM master_items i JOIN master_releases r ON r.id = i.release_id
+          WHERE r.kind = ? AND r.source = ? AND r.release_code = ? AND i.code = ?
+        )
+      `);
+      for (const row of rows) refresh.run(Number(row.performanceSelectable), row.unit, kind, source, releaseCode, row.code);
     }
     db.exec('COMMIT');
     return { kind, count: rows.length, duplicate: !release.changes };
@@ -179,7 +202,8 @@ export function searchCatalog(db: DatabaseSync, params: URLSearchParams) {
   const kind = params.get('kind') ?? '';
   const query = normal(params.get('q') ?? '');
   if (!Object.hasOwn(catalogKinds, kind) || query.length > 120) throw new CatalogError(400, '検索条件を確認してください。');
-  const now = todayJst();
+  const performance = kind === 'procedure' && params.get('use') === 'performance';
+  const now = performance ? calendarDate(params.get('on')) : todayJst();
   const release = db.prepare(`
     SELECT id, effective_from FROM master_releases WHERE kind = ? AND source = ? AND effective_from <= ?
     ORDER BY effective_from DESC, id DESC LIMIT 1
@@ -190,9 +214,21 @@ export function searchCatalog(db: DatabaseSync, params: URLSearchParams) {
     entries: db.prepare(`
       SELECT i.id, i.code, i.name, ? AS releaseDate, d.icd10, d.unit, d.drug_form AS drugForm, d.price_code AS priceCode
       FROM master_items i JOIN master_item_catalog_details d ON d.item_id = i.id
-      WHERE i.release_id = ? AND d.selectable = 1 AND i.effective_from <= ?
+      WHERE i.release_id = ? AND ${performance ? 'd.performance_selectable' : 'd.selectable'} = 1 AND i.effective_from <= ?
         AND (i.effective_until IS NULL OR i.effective_until >= ?) AND instr(d.search_text, ?) > 0
       ORDER BY (i.code = ?) DESC, i.code LIMIT 40
     `).all(release.effective_from, release.id, now, now, query, query),
   };
+}
+
+export function performanceMaster(db: DatabaseSync, id: number, on: string) {
+  return db.prepare(`
+    SELECT i.id, i.code, i.name, d.unit
+    FROM master_items i JOIN master_item_catalog_details d ON d.item_id = i.id
+    WHERE i.id = ? AND d.performance_selectable = 1 AND i.effective_from <= ?
+      AND (i.effective_until IS NULL OR i.effective_until >= ?)
+      AND i.release_id = (SELECT r.id FROM master_releases r
+        WHERE r.kind = 'procedure' AND r.source = ? AND r.effective_from <= ?
+        ORDER BY r.effective_from DESC, r.id DESC LIMIT 1)
+  `).get(id, on, on, source, on);
 }

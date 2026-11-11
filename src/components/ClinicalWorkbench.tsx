@@ -45,6 +45,7 @@ import {
 } from '../utils/emrLogic';
 
 import type { CatalogEntry } from '../types/catalog';
+import { ReceptTransferView } from './ReceptTransferView';
 import { ClinicalCatalogPicker } from './ClinicalCatalogPicker';
 
 function masterReference(entry: CatalogEntry): MasterReference {
@@ -55,6 +56,7 @@ interface ClinicalWorkbenchProps {
   patients: PatientRecord[];
   selectedPatientId: string;
   currentStaff: StaffMember;
+  clinicalRequest: <T>(path: string, signal: AbortSignal, body?: unknown) => Promise<T>;
   onSelectPatient: (patientId: string) => void;
   onUpdateSoap: (patientId: string, soap: Partial<SoapContent>) => void;
   onSaveSoap: (patientId: string) => Promise<boolean>;
@@ -73,7 +75,7 @@ interface ClinicalWorkbenchProps {
   onExportReferral: (patientId: string, hospital: string, purpose: string) => Promise<boolean>;
 }
 
-type CenterSubTab = 'soap' | 'labs_vitals' | 'revisions' | 'referral_doc';
+type CenterSubTab = 'soap' | 'labs_vitals' | 'revisions' | 'referral_doc' | 'recept';
 
 const STATUS_LABELS: Record<VisitStatus, string> = {
   waiting: '待合中',
@@ -111,6 +113,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   patients,
   selectedPatientId,
   currentStaff,
+  clinicalRequest,
   onSelectPatient,
   onUpdateSoap,
   onSaveSoap,
@@ -931,7 +934,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
         <div
           role="tablist"
           aria-label="カルテ表示モード切替"
-          className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-1 bg-slate-200/80 rounded-lg"
+          className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-1 p-1 bg-slate-200/80 rounded-lg"
         >
           {(
             [
@@ -942,6 +945,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                 label: `真正性・修正履歴 (第${selectedPatient.revisions.length}版)`,
                 icon: History,
               },
+              { id: 'recept', label: '実施記録・RECEPT連携', icon: ClipboardCheck },
               ...(canExportReferral ? [{ id: 'referral_doc' as const, label: '見読性・紹介状出力', icon: Printer }] : []),
             ] as const
           ).map((tab) => {
@@ -1763,6 +1767,12 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
         )}
 
         {/* SUB-TAB 4: READABILITY EXPORT / REFERRAL LETTER (見読性) */}
+        {centerTab === 'recept' && (
+          <ReceptTransferView key={selectedPatient.id} patientId={selectedPatient.id} request={clinicalRequest}
+            canRecord={canPerformAction(currentStaff.role, 'record_performance')}
+            canSend={canPerformAction(currentStaff.role, 'send_recept')} />
+        )}
+
         {centerTab === 'referral_doc' && canExportReferral && (
           <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">

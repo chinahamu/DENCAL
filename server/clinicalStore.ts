@@ -5,7 +5,7 @@ import { ClinicalError } from './clinicalInput';
 import { evidenceDigest, type SignatureEvidence } from './recordSigning';
 import { INITIAL_PATIENTS } from './clinicalSeed';
 
-export const CLINICAL_DB_VERSION = 5;
+export const CLINICAL_DB_VERSION = 6;
 export const GENERAL_DEPARTMENT = 'demo-general';
 
 const seedDepartments: Record<string, string> = {
@@ -240,7 +240,7 @@ export function verifyClinicalStore(db: DatabaseSync): number {
     LIMIT 1
   `).get();
   if (workspaceCount !== count || missingWorkspace) throw new ClinicalError(409, 'record_integrity_error');
-  if (db.prepare('PRAGMA user_version').get()?.user_version === CLINICAL_DB_VERSION) {
+  if (Number(db.prepare('PRAGMA user_version').get()?.user_version) >= 5) {
     const mismatchedEvidence = db.prepare(`
       SELECT 1 FROM clinical_note_revisions r
       LEFT JOIN clinical_revision_signatures s ON s.encounter_id = r.encounter_id AND s.revision = r.revision

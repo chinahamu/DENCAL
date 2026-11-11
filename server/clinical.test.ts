@@ -93,7 +93,7 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   const doctor = await login('demo-physician');
   const admin = await login('demo-admin');
   const unassigned = await login('other-doctor');
-  assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 5);
+  assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 6);
   assert.deepEqual(await ids(clerk), ['PT-001042', 'PT-001105', 'PT-001089']);
   assert.deepEqual(await ids(unassigned), []);
   assert.equal((await request(general, unassigned)).status, 404);

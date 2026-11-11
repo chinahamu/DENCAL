@@ -4,8 +4,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CatalogError, listCatalogs, receiveCatalog, saveCatalog, searchCatalog } from './catalog';
-import { clinicalRoute, handleClinical, prepareClinicalSignature } from './clinical';
+import { clinicalRoute, finishReceptDelivery, handleClinical, prepareClinicalSignature, startReceptDelivery } from './clinical';
 import { CLINICAL_DB_VERSION, findEncounterChart, readRevisionSignature, seedClinicalCharts, type Actor, type SignedFinalization } from './clinicalStore';
+import { sendRecept } from './receptOutbox';
 import { loadSigningConfig, signRevision, verifyRevisionSignature } from './recordSigning';
 import { ClinicalError, readClinicalInput } from './clinicalInput';
 import type { StaffMember } from '../src/types/emr';
@@ -88,7 +89,7 @@ function openDatabase(path: string, readOnly: boolean) {
   } finally {
     probe.close();
   }
-  if (version === 2 || version === 3 || version === 4) {
+  if (version === 2 || version === 3 || version === 4 || version === 5) {
     const migration = new DatabaseSync(path);
     try {
       migration.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000; BEGIN IMMEDIATE');
@@ -104,6 +105,12 @@ function openDatabase(path: string, readOnly: boolean) {
       }
       if (version === 4) {
         migration.exec(readFileSync(resolve('database/clinical-signatures.sql'), 'utf8'));
+        migration.exec('PRAGMA user_version = 5');
+        version = 5;
+      }
+      if (version === 5) {
+        migration.exec(readFileSync(resolve('database/catalog-details.sql'), 'utf8'));
+        migration.exec(readFileSync(resolve('database/recept-outbox.sql'), 'utf8'));
         migration.exec(`PRAGMA user_version = ${CLINICAL_DB_VERSION}`);
         version = CLINICAL_DB_VERSION;
       }
@@ -237,6 +244,15 @@ export function createAuthMiddleware() {
           return json(res, 200, { status: 'verified', ...metadata });
         }
 
+        if (clinical.kind === 'recept' && clinical.operation === 'recept_send') {
+          const attempt = transaction(true, (actor) => startReceptDelivery(db!, actor, clinical.patientId, input));
+          if (attempt) {
+            const delivery = await sendRecept(attempt);
+            const workspace = transaction(true, (actor) => finishReceptDelivery(db!, actor, clinical.patientId, attempt, delivery));
+            return json(res, 200, workspace);
+          }
+        }
+
         let signed: SignedFinalization | undefined;
         if (signing && clinical.kind === 'operation' && clinical.operation === 'finalize') {
           const candidate = transaction(false, (actor) => ({
@@ -254,10 +270,12 @@ export function createAuthMiddleware() {
         return json(res, 403, { error: 'forbidden' });
       }
       if (catalog || catalogSearch) {
-        if (!canPerformAction(staff.role, catalog ? 'manage_catalog' : 'edit_soap')) {
+        const params = new URLSearchParams(req.url?.split('?')[1]);
+        const action = catalog ? 'manage_catalog'
+          : params.get('kind') === 'procedure' && params.get('use') === 'performance' ? 'record_performance' : 'edit_soap';
+        if (!canPerformAction(staff.role, action)) {
           return json(res, 403, { error: 'この操作を行う職種の権限がありません。' });
         }
-        const params = new URLSearchParams(req.url?.split('?')[1]);
         if (catalogSearch) return json(res, 200, searchCatalog(db, params));
         if (read) return json(res, 200, listCatalogs(db));
         return json(res, 200, saveCatalog(db, await receiveCatalog(req, params)));

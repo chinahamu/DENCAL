@@ -27,6 +27,8 @@ const PERMISSION_ROWS: { action: EmrAction; label: string }[] = [
   { action: 'edit_soap', label: 'SOAP第2号用紙の作成・追記編集' },
   { action: 'sign_soap', label: '診療録の確定・訂正版の確定' },
   { action: 'add_prescription', label: '処方オーダ・検体検査オーダの発行' },
+  { action: 'record_performance', label: '診療行為の実施登録・取消' },
+  { action: 'send_recept', label: 'RECEPT送信待ちの作成・送信' },
   { action: 'record_vitals', label: 'バイタルサイン・トリアージ測定値の登録' },
   { action: 'register_patient', label: '新規患者登録・オンライン資格確認受付' },
   { action: 'settle_billing', label: '診療報酬算定確定・領収書/明細書発行' },
