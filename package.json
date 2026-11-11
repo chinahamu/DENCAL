@@ -13,7 +13,8 @@
     "records:export": "node --import tsx server/recordTransfer.ts export",
     "records:verify": "node --import tsx server/recordTransfer.ts verify",
     "records:restore": "node --import tsx server/recordTransfer.ts restore",
-    "test:integration": "node --test integration/recept-v1/contract.test.mjs"
+    "test:integration": "node --test integration/recept-v1/contract.test.mjs",
+    "test:integration:e2e": "node --import tsx --test server/recept.e2e.test.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",
