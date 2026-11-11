@@ -1,0 +1,38 @@
+name: 不具合報告
+description: 操作中に起きたエラーや、期待どおりに動かない箇所を報告する
+title: "[不具合] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        この Issue は公開されます。患者情報（氏名、患者番号、診療内容など）、認証情報、実データを含むログや画像は掲載しないでください。例が必要な場合は架空データを使ってください。
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際に起きたこと
+      description: 対象の画面・機能と、起きたことを記載してください。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: 架空データで試した操作を順に記載してください。再現できない場合は、分かっている発生条件や頻度を記載してください。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待した動作
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 利用環境
+      description: 分かる範囲で、バージョンやコミット、OS、ブラウザなどを記載してください。
+  - type: textarea
+    id: evidence
+    attributes:
+      label: エラーメッセージ・補足
+      description: 機微情報を除いたエラーメッセージや、架空データで再現した画面があれば添付してください。

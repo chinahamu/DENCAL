@@ -1,0 +1,25 @@
+name: 質問・使い方
+description: 導入、設定、使い方、仕様について質問する
+title: "[質問] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        この Issue は公開されます。患者情報（氏名、患者番号、診療内容など）、認証情報、実データを含むログや画像は掲載しないでください。例が必要な場合は架空データを使ってください。
+  - type: textarea
+    id: question
+    attributes:
+      label: 質問したいこと
+      description: 知りたいことや、どの画面・手順で困っているかを書いてください。
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 試したこと・確認した資料
+      description: 試した操作や参照した README、手順書などがあれば記載してください。
+  - type: input
+    id: environment
+    attributes:
+      label: 利用環境
+      description: 分かる範囲で、バージョンやコミット、OS、ブラウザなどを記載してください。

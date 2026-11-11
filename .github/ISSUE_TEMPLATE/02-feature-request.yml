@@ -1,0 +1,27 @@
+name: 実務上の改善要望
+description: 日々の業務で困っていることや、機能・画面・手順書の改善を提案する
+title: "[改善要望] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        この Issue は公開されます。患者情報（氏名、患者番号、診療内容など）、認証情報、実データを含むログや画像は掲載しないでください。例が必要な場合は架空データを使ってください。
+  - type: textarea
+    id: problem
+    attributes:
+      label: どの業務で、何に困っていますか
+      description: 使う人の役割、作業の流れ、現在の負担や手戻りを分かる範囲で記載してください。
+    validations:
+      required: true
+  - type: textarea
+    id: desired-outcome
+    attributes:
+      label: どうなれば業務が改善しますか
+      description: 期待する結果を記載してください。具体的な実装方法が決まっている必要はありません。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 現在の回避策・補足
+      description: 現在の工夫、発生頻度、提案したい操作や画面などがあれば記載してください。
