@@ -9,6 +9,8 @@ const minimum = {
   edit_soap: 'doctor',
   sign_soap: 'doctor',
   add_prescription: 'doctor',
+  export_referral: 'doctor',
+  export_archive: 'admin',
   create_backup: 'admin',
   restore_backup: 'admin',
   view_audit: 'admin',

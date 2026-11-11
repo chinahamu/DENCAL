@@ -20,7 +20,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), staffAuth()],
   server: {
     host: '127.0.0.1',
-    fs: { deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/*.sqlite3*'] },
+    fs: { deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/server/**', '**/*.sqlite3*'] },
   },
   preview: { host: '127.0.0.1' },
 });

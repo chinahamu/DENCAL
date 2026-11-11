@@ -32,6 +32,8 @@ const PERMISSION_ROWS: { action: EmrAction; label: string }[] = [
   { action: 'settle_billing', label: '診療報酬算定確定・領収書/明細書発行' },
   { action: 'create_backup', label: '暗号化バックアップ作成・整合性検証（保存性）' },
   { action: 'restore_backup', label: 'バックアップ世代からのシステム復元操作' },
+  { action: 'export_referral', label: '紹介状の出力' },
+  { action: 'export_archive', label: '全カルテのデモJSON出力' },
   { action: 'view_audit', label: '安全管理画面・監査証跡の閲覧' },
 ];
 

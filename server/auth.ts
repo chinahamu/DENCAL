@@ -1,8 +1,11 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CatalogError, listCatalogs, receiveCatalog, saveCatalog, searchCatalog } from './catalog';
+import { clinicalRoute, createClinicalDemo } from './clinical';
+import { ClinicalError, readClinicalInput } from './clinicalInput';
 import type { StaffMember } from '../src/types/emr';
 import { canPerformAction, isEmrAction } from '../src/utils/permissions';
 
@@ -22,6 +25,7 @@ type StaffRow = {
   staff_code: string;
   display_name: string;
   department: string | null;
+  department_code: string | null;
   role: keyof typeof roles;
 };
 
@@ -31,7 +35,7 @@ function staffMember(row: StaffRow): StaffMember {
   const [role, roleLabel] = roles[row.role];
   return {
     id: row.staff_code, name: row.display_name, role, roleLabel,
-    department: row.department ?? '', twoFactorEnabled: false,
+    department: row.department ?? '', departmentCode: row.department_code ?? undefined, twoFactorEnabled: false,
   };
 }
 
@@ -73,9 +77,36 @@ async function credentials(req: IncomingMessage) {
   return null;
 }
 
+function openDatabase(path: string, readOnly: boolean) {
+  // A read-only probe prevents SQLite from creating an uninitialized database.
+  const probe = new DatabaseSync(path, { readOnly: true });
+  let version: unknown;
+  try {
+    version = probe.prepare('PRAGMA user_version').get()?.user_version;
+  } finally {
+    probe.close();
+  }
+  if (version === 2) {
+    const migration = new DatabaseSync(path);
+    try {
+      migration.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000; BEGIN IMMEDIATE');
+      if (migration.prepare('PRAGMA user_version').get()?.user_version === 2) {
+        migration.exec(readFileSync(resolve('database/clinical-departments.sql'), 'utf8'));
+      }
+      version = migration.prepare('PRAGMA user_version').get()?.user_version;
+      migration.exec('COMMIT');
+    } finally {
+      migration.close();
+    }
+  }
+  if (version !== 3) throw new Error('Unsupported database version');
+  return new DatabaseSync(path, { readOnly });
+}
+
 export function createAuthMiddleware() {
   const path = resolve(process.env.DENCAL_DB || 'data/dencal.sqlite3');
   if (extname(path) !== '.sqlite3') throw new Error('DENCAL_DB には .sqlite3 ファイルを指定してください。');
+  const handleClinical = createClinicalDemo();
   let failedLogins = 0;
   let windowEnd = 0;
 
@@ -88,8 +119,9 @@ export function createAuthMiddleware() {
     const access = /^\/api\/access\/([a-z_]+)$/.exec(route)?.[1];
     const catalogSearch = route === '/api/catalog/search';
     const catalog = route === '/api/catalog';
-    const read = catalogSearch || (catalog && req.method !== 'POST') || route === '/api/session' || (access !== undefined && isEmrAction(access));
-    const write = (catalog && req.method === 'POST') || route === '/api/login' || route === '/api/logout';
+    const clinical = clinicalRoute(route, req.method);
+    const read = clinical?.method === 'GET' || catalogSearch || (catalog && req.method !== 'POST') || route === '/api/session' || (access !== undefined && isEmrAction(access));
+    const write = clinical?.method === 'POST' || (catalog && req.method === 'POST') || route === '/api/login' || route === '/api/logout';
     if (!read && !write) return json(res, 404, { error: 'not_found' });
     if (req.method !== (read ? 'GET' : 'POST')) {
       res.setHeader('Allow', read ? 'GET' : 'POST');
@@ -114,17 +146,7 @@ export function createAuthMiddleware() {
 
     let db: DatabaseSync | undefined;
     try {
-      // Open read-only first so an uninitialized path never creates an empty DB.
-      const probe = new DatabaseSync(path, { readOnly: true });
-      try {
-        if (probe.prepare('PRAGMA user_version').get()?.user_version !== 2) {
-          return json(res, 503, { error: 'database_unavailable' });
-        }
-      } finally {
-        probe.close();
-      }
-
-      db = new DatabaseSync(path, { readOnly: read });
+      db = openDatabase(path, read || Boolean(clinical));
       db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000');
       const now = Math.floor(Date.now() / 1000);
       const hash = sessionHash(req);
@@ -132,7 +154,7 @@ export function createAuthMiddleware() {
 
       if (login) {
         const account = db.prepare(`
-          SELECT s.id, s.staff_code, s.display_name, s.role, d.name AS department, c.salt, c.password_hash
+          SELECT s.id, s.staff_code, s.display_name, s.role, d.name AS department, d.code AS department_code, c.salt, c.password_hash
           FROM staff s JOIN staff_credentials c ON c.staff_id = s.id
           LEFT JOIN departments d ON d.id = s.department_id WHERE s.staff_code = ? AND s.active = 1
         `).get(login.staffId) as CredentialRow | undefined;
@@ -158,15 +180,25 @@ export function createAuthMiddleware() {
         return json(res, 200, { staff: null });
       }
 
-      const row = hash && db.prepare(`
-        SELECT s.id, s.staff_code, s.display_name, s.role, d.name AS department
+      const session = db.prepare(`
+        SELECT s.id, s.staff_code, s.display_name, s.role, d.name AS department, d.code AS department_code
         FROM staff_sessions ss JOIN staff s ON s.id = ss.staff_id
         LEFT JOIN departments d ON d.id = s.department_id
         WHERE ss.token_hash = ? AND ss.expires_at > ? AND s.active = 1
-      `).get(hash, now) as StaffRow | undefined;
+      `);
+      const currentSession = () => hash ? session.get(hash, Math.floor(Date.now() / 1000)) as StaffRow | undefined : undefined;
+      let row = currentSession();
       if (!row) return json(res, 401, { error: 'login_required' });
 
       const staff = staffMember(row);
+      if (clinical) {
+        if (!canPerformAction(staff.role, clinical.action)) return json(res, 403, { error: 'forbidden' });
+        const input = write ? await readClinicalInput(req) : undefined;
+        // The request body can arrive after a session expires or an assignment changes.
+        if (write) row = currentSession();
+        if (!row) return json(res, 401, { error: 'login_required' });
+        return json(res, 200, handleClinical(clinical, { ...staffMember(row), departmentCode: row.department_code }, input));
+      }
       if (access && (!isEmrAction(access) || !canPerformAction(staff.role, access))) {
         return json(res, 403, { error: 'forbidden' });
       }
@@ -181,7 +213,7 @@ export function createAuthMiddleware() {
       }
       return json(res, 200, access ? { allowed: true } : { staff });
     } catch (error) {
-      if (error instanceof CatalogError) return json(res, error.status, { error: error.message });
+      if (error instanceof CatalogError || error instanceof ClinicalError) return json(res, error.status, { error: error.message });
       return json(res, 503, { error: 'database_unavailable' });
     } finally {
       db?.close();

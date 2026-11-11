@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test src/utils/emrLogic.test.ts",
+    "test": "node --import tsx --test src/utils/emrLogic.test.ts server/clinical.test.ts",
     "db:init": "python3 database/init.py"
   },
   "dependencies": {

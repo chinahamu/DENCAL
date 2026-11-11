@@ -56,17 +56,17 @@ interface ClinicalWorkbenchProps {
   selectedPatientId: string;
   currentStaff: StaffMember;
   onSelectPatient: (patientId: string) => void;
-  onUpdateSoap: (patientId: string, soap: SoapContent) => void;
-  onToggleDiagnosis: (patientId: string, disease: DiseaseRecord) => void;
-  onAddPrescription: (patientId: string, item: PrescriptionItem) => void;
-  onRemovePrescription: (patientId: string, prescriptionId: string) => void;
-  onToggleLabOrder: (patientId: string, labOrder: LabOrderItem) => void;
-  onSignAndFinalizeChart: (patientId: string, revisionReason: string) => void;
-  onAddVitalSign: (patientId: string, vital: VitalRecord) => void;
-  onAddAllergy: (patientId: string, allergy: AllergyItem) => void;
+  onUpdateSoap: (patientId: string, soap: Partial<SoapContent>) => void;
+  onToggleDiagnosis: (patientId: string, disease: DiseaseRecord) => Promise<boolean>;
+  onAddPrescription: (patientId: string, item: PrescriptionItem) => Promise<boolean>;
+  onRemovePrescription: (patientId: string, prescriptionId: string) => Promise<boolean>;
+  onToggleLabOrder: (patientId: string, labOrder: LabOrderItem) => Promise<boolean>;
+  onSignAndFinalizeChart: (patientId: string, revisionReason: string) => Promise<boolean>;
+  onAddVitalSign: (patientId: string, vital: VitalRecord) => Promise<boolean>;
+  onAddAllergy: (patientId: string, allergy: AllergyItem) => Promise<boolean>;
   onOpenNewPatientModal: () => void;
   onNavigateToBilling: (patientId: string) => void;
-  onRecordDocumentExport: (patientId: string, docTitle: string) => void;
+  onExportReferral: (patientId: string, hospital: string, purpose: string) => Promise<boolean>;
 }
 
 type CenterSubTab = 'soap' | 'labs_vitals' | 'revisions' | 'referral_doc';
@@ -118,7 +118,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   onAddAllergy,
   onOpenNewPatientModal,
   onNavigateToBilling,
-  onRecordDocumentExport,
+  onExportReferral,
 }) => {
   // Collapsed by default per user request ("受付リストはサイドに折りたたんでおく")
   const [isQueueExpanded, setIsQueueExpanded] = useState<boolean>(false);
@@ -207,6 +207,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
 
   const canEditSoap = canPerformAction(currentStaff.role, 'edit_soap');
   const canSignSoap = canPerformAction(currentStaff.role, 'sign_soap');
+  const canExportReferral = canPerformAction(currentStaff.role, 'export_referral');
   const canAddRx = canPerformAction(currentStaff.role, 'add_prescription');
   const canRecordVitals = canPerformAction(currentStaff.role, 'record_vitals');
 
@@ -227,9 +228,9 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
     setOverrideContraConfirm(false);
   }
 
-  function addDiagnosis() {
+  async function addDiagnosis() {
     if (!selectedPatient || !canAddDiagnosis || !selectedDisease) return;
-    onToggleDiagnosis(selectedPatient.id, {
+    if (!await onToggleDiagnosis(selectedPatient.id, {
       id: `disease-${crypto.randomUUID()}`,
       master: masterReference(selectedDisease),
       name: selectedDisease.name,
@@ -238,13 +239,13 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
       isChronicDiseaseTarget: false,
       startDate: new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }),
       outcome: suspected ? 'suspected' : 'ongoing',
-    });
+    })) return;
     setSuspected(false);
   }
 
-  function handleAddPrescriptionClick() {
+  async function handleAddPrescriptionClick() {
     if (!selectedPatient || !canSubmitRx || !selectedDrug) return;
-    onAddPrescription(selectedPatient.id, {
+    if (!await onAddPrescription(selectedPatient.id, {
       id: `rx-${crypto.randomUUID()}`,
       master: masterReference(selectedDrug),
       priceCode: selectedDrug.priceCode || undefined,
@@ -254,46 +255,42 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
       days: rxDayCount,
       category: selectedDrug.drugForm === '6' ? 'external' : rxAsNeeded ? 'as_needed' : 'internal',
       genericAllowed: false,
-    });
+    })) return;
     selectDrug(undefined);
   }
 
-  function addLab() {
+  async function addLab() {
     if (!selectedPatient || !canAddLab || !selectedLab) return;
-    onToggleLabOrder(selectedPatient.id, {
+    if (!await onToggleLabOrder(selectedPatient.id, {
       id: `official-${selectedLab.code}`,
       master: masterReference(selectedLab),
       code: selectedLab.code,
       name: selectedLab.name,
-    });
+    })) return;
     setSelectedLab(undefined);
   }
 
-  const handleSignClick = () => {
+  const handleSignClick = async () => {
     if (!selectedPatient || !canSignSoap) return;
     const reason =
       selectedPatient.revisions.length > 0
         ? revisionReason.trim() || '検査結果反映・処方内容確定に伴う改訂署名'
         : '初版カルテ確定およびHPKI医師資格証による電子署名';
-    onSignAndFinalizeChart(selectedPatient.id, reason);
+    if (!await onSignAndFinalizeChart(selectedPatient.id, reason)) return;
     setRevisionReason('');
     setSignBannerMessage(
-      `HPKI電子署名（${currentStaff.hpkiCertId || 'HPKI-JP-MED'}）およびSHA-256改ざん検知ハッシュを付与し、診療録を確定しました。`
+      '診療録のデモ版を確定しました。'
     );
     setTimeout(() => setSignBannerMessage(null), 5000);
   };
 
-  const handleSaveVital = (e: React.FormEvent) => {
+  const handleSaveVital = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPatient) return;
     const prevWeight = selectedPatient.vitalsHistory[0]?.weightKg || 60.0;
     const prevBmi = selectedPatient.vitalsHistory[0]?.bmi || 22.0;
-    const nowStr = new Date().toLocaleTimeString('ja-JP', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-    onAddVitalSign(selectedPatient.id, {
-      measuredAt: `2026-11-09 ${nowStr}`,
+    if (!await onAddVitalSign(selectedPatient.id, {
+      measuredAt: '',
       systolicBp: Number(vitalSys),
       diastolicBp: Number(vitalDia),
       pulse: Number(vitalPulse),
@@ -301,19 +298,19 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
       spo2: Number(vitalSpo2),
       weightKg: prevWeight,
       bmi: prevBmi,
-    });
+    })) return;
     setShowVitalForm(false);
   };
 
-  const handleSaveAllergy = (e: React.FormEvent) => {
+  const handleSaveAllergy = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPatient || !canRecordVitals || !newAllergySubstance.trim()) return;
-    onAddAllergy(selectedPatient.id, {
+    if (!await onAddAllergy(selectedPatient.id, {
       substance: newAllergySubstance.trim(),
       category: 'drug',
       severity: 'severe',
       reaction: newAllergyReaction.trim() || '発疹・過敏症既往',
-    });
+    })) return;
     setNewAllergySubstance('');
     setNewAllergyReaction('');
     setShowAllergyForm(false);
@@ -324,7 +321,6 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
     const currentVal = selectedPatient.currentSoap[field];
     const separator = currentVal.trim().length > 0 ? '\n' : '';
     onUpdateSoap(selectedPatient.id, {
-      ...selectedPatient.currentSoap,
       [field]: `${currentVal}${separator}${textToAppend}`,
     });
   };
@@ -934,7 +930,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                 label: `真正性・修正履歴 (第${selectedPatient.revisions.length}版)`,
                 icon: History,
               },
-              { id: 'referral_doc', label: '見読性・紹介状出力', icon: Printer },
+              ...(canExportReferral ? [{ id: 'referral_doc' as const, label: '見読性・紹介状出力', icon: Printer }] : []),
             ] as const
           ).map((tab) => {
             const Icon = tab.icon;
@@ -1123,7 +1119,6 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                   value={selectedPatient.currentSoap.subjective}
                   onChange={(e) =>
                     onUpdateSoap(selectedPatient.id, {
-                      ...selectedPatient.currentSoap,
                       subjective: e.target.value,
                     })
                   }
@@ -1203,7 +1198,6 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                   value={selectedPatient.currentSoap.objective}
                   onChange={(e) =>
                     onUpdateSoap(selectedPatient.id, {
-                      ...selectedPatient.currentSoap,
                       objective: e.target.value,
                     })
                   }
@@ -1266,7 +1260,6 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                   value={selectedPatient.currentSoap.assessment}
                   onChange={(e) =>
                     onUpdateSoap(selectedPatient.id, {
-                      ...selectedPatient.currentSoap,
                       assessment: e.target.value,
                     })
                   }
@@ -1314,7 +1307,6 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                   value={selectedPatient.currentSoap.plan}
                   onChange={(e) =>
                     onUpdateSoap(selectedPatient.id, {
-                      ...selectedPatient.currentSoap,
                       plan: e.target.value,
                     })
                   }
@@ -1730,7 +1722,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
         )}
 
         {/* SUB-TAB 4: READABILITY EXPORT / REFERRAL LETTER (見読性) */}
-        {centerTab === 'referral_doc' && (
+        {centerTab === 'referral_doc' && canExportReferral && (
           <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
               <div>
@@ -1743,11 +1735,10 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  onRecordDocumentExport(selectedPatient.id, '診療情報提供書（紹介状）出力');
-                  setPrintPreviewNotif(
-                    `患者 ${selectedPatient.kanjiName} 様の診療情報提供書（PDF/印刷用標準フォーマット）を生成し、監査ログに記録しました。`
-                  );
+                onClick={async () => {
+                  if (await onExportReferral(selectedPatient.id, referralHospital, referralPurpose)) {
+                    setPrintPreviewNotif('デモ紹介状のテキストを出力しました。');
+                  }
                 }}
                 className="px-3.5 py-2 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >

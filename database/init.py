@@ -52,6 +52,8 @@ def main():
             connection.executescript(schema)
             connection.executescript(Path(__file__).with_name("catalog-details.sql").read_text(encoding="utf-8"))
             credentials = seed_demo_staff(connection)
+            departments = Path(__file__).with_name("clinical-departments.sql").read_text(encoding="utf-8")
+            connection.executescript("BEGIN IMMEDIATE;\n" + departments + "\nCOMMIT;")
     except Exception:
         path.unlink()
         raise

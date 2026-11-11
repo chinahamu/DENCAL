@@ -1,17 +1,15 @@
 import React, { useState } from 'react';
 import { ShieldCheck, X } from 'lucide-react';
-import { PatientRecord } from '../types/emr';
+import { PatientRegistration } from '../types/emr';
 
 interface NewPatientModalProps {
   isOpen: boolean;
-  existingCount: number;
   onClose: () => void;
-  onRegisterPatient: (newPatient: PatientRecord) => void;
+  onRegisterPatient: (newPatient: PatientRegistration) => Promise<boolean>;
 }
 
 export const NewPatientModal: React.FC<NewPatientModalProps> = ({
   isOpen,
-  existingCount,
   onClose,
   onRegisterPatient,
 }) => {
@@ -27,91 +25,34 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
   >('社保・本人');
   const [copayRatio, setCopayRatio] = useState<0.1 | 0.2 | 0.3>(0.3);
   const [chiefComplaint, setChiefComplaint] = useState('');
-  const [allergyText, setAllergyText] = useState('');
   const [mynaVerified, setMynaVerified] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const [submitting, setSubmitting] = useState(false);
+
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     if (!kanjiName.trim() || !kanaName.trim() || !chiefComplaint.trim()) {
       setErrorMessage('患者氏名・フリガナ・本日の主訴は必須入力項目です。');
       return;
     }
 
-    const birthYear = Number(birthDate.split('-')[0]) || 1980;
-    const age = Math.max(0, 2026 - birthYear);
-    const nextNum = existingCount + 1;
-    const ptId = `PT-0011${String(nextNum + 10).padStart(2, '0')}`;
-    const receptionNumber = `A-${String(nextNum).padStart(3, '0')}`;
-    const nowTime = new Date().toLocaleTimeString('ja-JP', {
-      hour: '2-digit',
-      minute: '2-digit',
+    setSubmitting(true);
+    const saved = await onRegisterPatient({
+      kanjiName, kanaName, sex, birthDate, bloodType, phone, address,
+      insuranceType, copayRatio, chiefComplaint, mynaVerified,
     });
-
-    const newPatient: PatientRecord = {
-      id: ptId,
-      kanjiName: kanjiName.trim(),
-      kanaName: kanaName.trim(),
-      sex,
-      birthDate,
-      age,
-      bloodType,
-      phone,
-      address,
-      insuranceType,
-      insurerNumber: '06139912',
-      copayRatio,
-      mynaVerified,
-      visitType: '初診',
-      visitStatus: 'waiting',
-      receptionTime: nowTime,
-      receptionNumber,
-      chiefComplaint: chiefComplaint.trim(),
-      allergies: allergyText.trim()
-        ? [
-            {
-              substance: allergyText.trim(),
-              category: 'drug',
-              severity: 'moderate',
-              reaction: '問診票申告あり',
-            },
-          ]
-        : [],
-      contraindicatedClasses: [],
-      diseases: [],
-      vitalsHistory: [
-        {
-          measuredAt: `2026-11-09 ${nowTime}`,
-          systolicBp: 122,
-          diastolicBp: 76,
-          pulse: 72,
-          temperature: 36.6,
-          spo2: 98,
-          weightKg: 60.0,
-          bmi: 21.8,
-        },
-      ],
-      labHistory: [],
-      currentSoap: {
-        subjective: `【初診問診】${chiefComplaint.trim()}`,
-        objective: 'バイタル測定済。診察室にて身体診察予定。',
-        assessment: '#1 初診鑑別診断中',
-        plan: '診察の上、検査・処方方針を決定。',
-      },
-      currentPrescriptions: [],
-      currentLabOrders: [],
-      isSigned: false,
-      revisions: [],
-      billingCompleted: false,
-    };
-
-    onRegisterPatient(newPatient);
+    setSubmitting(false);
+    if (!saved) {
+      setErrorMessage('患者を登録できませんでした。入力内容、職種と所属部署を確認してください。');
+      return;
+    }
     setKanjiName('');
     setKanaName('');
     setChiefComplaint('');
-    setAllergyText('');
     setErrorMessage(null);
     onClose();
   };
@@ -272,20 +213,6 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
             />
           </div>
 
-          <div>
-            <label htmlFor="np-allergy" className="block font-semibold text-slate-700 mb-1">
-              薬物・食物アレルギー歴（任意）
-            </label>
-            <input
-              id="np-allergy"
-              type="text"
-              value={allergyText}
-              onChange={(e) => setAllergyText(e.target.value)}
-              placeholder="例：ペニシリン系抗菌薬、造影剤など（なければ空欄）"
-              className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-slate-900"
-            />
-          </div>
-
           <label className="p-2.5 bg-teal-50/60 border border-teal-200 rounded flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
@@ -308,7 +235,7 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
               キャンセル
             </button>
             <button
-              type="submit"
+              type="submit" disabled={submitting}
               className="px-4 py-2 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-md"
             >
               受付確定・カルテを開設

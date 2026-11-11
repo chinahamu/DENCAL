@@ -19,7 +19,7 @@ interface ReceptionBillingViewProps {
   currentStaff: StaffMember;
   onSelectPatient: (patientId: string) => void;
   onOpenNewPatientModal: () => void;
-  onCompleteBilling: (patientId: string) => void;
+  onCompleteBilling: (patientId: string) => Promise<boolean>;
   onNavigateToChart: (patientId: string) => void;
 }
 
@@ -74,9 +74,9 @@ export const ReceptionBillingView: React.FC<ReceptionBillingViewProps> = ({
   const canSettleBilling =
     canPerformAction(currentStaff.role, 'settle_billing');
 
-  const handleSettleClick = () => {
+  const handleSettleClick = async () => {
     if (!selectedPatient) return;
-    onCompleteBilling(selectedPatient.id);
+    if (!await onCompleteBilling(selectedPatient.id)) return;
     setReceiptToast(
       `${selectedPatient.kanjiName} 様の窓口会計（¥${feeCalc?.copayAmountYen.toLocaleString()}）を確定し、領収書・診療明細書・院外処方箋を発行しました。`
     );

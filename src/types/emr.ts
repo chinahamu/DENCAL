@@ -6,6 +6,7 @@ export interface StaffMember {
   role: UserRole;
   roleLabel: string;
   department: string;
+  departmentCode?: string;
   hpkiCertId?: string; // 保健医療福祉分野公開鍵基盤 (HPKI) 医師資格証ID
   twoFactorEnabled: boolean;
 }
@@ -144,6 +145,11 @@ export interface PatientRecord {
   billingCompleted: boolean;
   receiptIssuedAt?: string;
 }
+
+export type PatientRegistration = Pick<PatientRecord,
+  'kanjiName' | 'kanaName' | 'sex' | 'birthDate' | 'bloodType' | 'phone' | 'address' |
+  'insuranceType' | 'copayRatio' | 'mynaVerified' | 'chiefComplaint'
+>;
 
 export interface DrugCatalogItem {
   yjCode: string;
