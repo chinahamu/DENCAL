@@ -101,6 +101,7 @@ export interface SoapRevision {
   authorName: string;
   authorRole: UserRole;
   hpkiSignatureId?: string;
+  electronicSignature?: { timestampUtc: string; signerFingerprint: string };
   enteredByName?: string;
   enteredAt?: string;
   diseases?: DiseaseRecord[];

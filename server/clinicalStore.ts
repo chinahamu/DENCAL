@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { DiseaseRecord, LabOrderItem, PatientRecord, PrescriptionItem, SoapContent, SoapRevision, UserRole } from '../src/types/emr';
 import { ClinicalError } from './clinicalInput';
+import { evidenceDigest, type SignatureEvidence } from './recordSigning';
 import { INITIAL_PATIENTS } from './clinicalSeed';
 
-export const CLINICAL_DB_VERSION = 4;
+export const CLINICAL_DB_VERSION = 5;
 export const GENERAL_DEPARTMENT = 'demo-general';
 
 const seedDepartments: Record<string, string> = {
@@ -69,6 +70,7 @@ type RevisionRow = Record<string, SQLOutputValue> & SoapContent & {
   correction_reason: string | null;
   content_sha256: string;
   content_json: string;
+  signature_reference: string | null;
 };
 
 type RevisionContent = {
@@ -98,11 +100,39 @@ function workspace(patient: PatientRecord): Workspace {
     currentPrescriptions, currentLabOrders, billingCompleted, receiptIssuedAt };
 }
 
-function digest(patientId: string, entry: RevisionRow, previousHash: string): string {
-  return createHash('sha256').update(JSON.stringify([
+function revisionPayload(patientId: string, entry: RevisionRow, previousHash: string): Buffer {
+  return Buffer.from(JSON.stringify([
     patientId, entry.encounter_id, entry.revision, entry.previous_revision, soap(entry), entry.finalized_by,
     entry.finalized_at, entry.correction_reason, entry.content_json, previousHash,
-  ])).digest('hex');
+  ]), 'utf8');
+}
+
+function digest(patientId: string, entry: RevisionRow, previousHash: string): string {
+  return createHash('sha256').update(revisionPayload(patientId, entry, previousHash)).digest('hex');
+}
+
+function loadEvidence(db: DatabaseSync, entry: RevisionRow): SignatureEvidence | undefined {
+  if (entry.signature_reference === null) return undefined;
+  const row = db.prepare('SELECT * FROM clinical_revision_signatures WHERE encounter_id = ? AND revision = ?')
+    .get(entry.encounter_id, entry.revision);
+  if (!row || !(row.cms_der instanceof Uint8Array) || !(row.request_der instanceof Uint8Array) ||
+      !(row.response_der instanceof Uint8Array) || typeof row.signer_fingerprint !== 'string' ||
+      typeof row.timestamp_utc !== 'string') throw new ClinicalError(409, 'record_integrity_error');
+  const evidence: SignatureEvidence = {
+    cms: Buffer.from(row.cms_der), request: Buffer.from(row.request_der), response: Buffer.from(row.response_der),
+    signerFingerprint: row.signer_fingerprint, timestampUtc: row.timestamp_utc,
+  };
+  if (evidenceDigest(evidence) !== entry.signature_reference) throw new ClinicalError(409, 'record_integrity_error');
+  return evidence;
+}
+
+export function readRevisionSignature(db: DatabaseSync, chart: Chart, revision: number) {
+  const summary = chart.patient.revisions.find((entry) => entry.revisionNumber === revision);
+  if (!summary) throw new ClinicalError(404, 'not_found');
+  const row = db.prepare('SELECT * FROM clinical_note_revisions WHERE encounter_id = ? AND revision = ?')
+    .get(chart.row.encounter_id, revision) as RevisionRow;
+  const evidence = loadEvidence(db, row);
+  return evidence ? { payload: revisionPayload(chart.patient.id, row, summary.previousHash), evidence } : undefined;
 }
 
 function revisionHistory(db: DatabaseSync, row: Row): SoapRevision[] {
@@ -117,6 +147,7 @@ function revisionHistory(db: DatabaseSync, row: Row): SoapRevision[] {
       throw new ClinicalError(409, 'record_integrity_error');
     }
     const content = JSON.parse(entry.content_json) as RevisionContent;
+    const evidence = loadEvidence(db, entry);
     history.push({
       revisionNumber: entry.revision,
       timestamp: entry.finalized_at,
@@ -129,6 +160,9 @@ function revisionHistory(db: DatabaseSync, row: Row): SoapRevision[] {
       soap: soap(entry), prescriptions: content.prescriptions, labOrders: content.labOrders,
       diseases: content.diseases ?? undefined,
       sha256Hash: entry.content_sha256, previousHash,
+      ...(evidence && { electronicSignature: {
+        timestampUtc: evidence.timestampUtc, signerFingerprint: evidence.signerFingerprint,
+      } }),
     });
     previousHash = entry.content_sha256;
   }
@@ -206,6 +240,14 @@ export function verifyClinicalStore(db: DatabaseSync): number {
     LIMIT 1
   `).get();
   if (workspaceCount !== count || missingWorkspace) throw new ClinicalError(409, 'record_integrity_error');
+  if (db.prepare('PRAGMA user_version').get()?.user_version === CLINICAL_DB_VERSION) {
+    const mismatchedEvidence = db.prepare(`
+      SELECT 1 FROM clinical_note_revisions r
+      LEFT JOIN clinical_revision_signatures s ON s.encounter_id = r.encounter_id AND s.revision = r.revision
+      WHERE (r.signature_reference IS NULL) <> (s.revision IS NULL) LIMIT 1
+    `).get();
+    if (mismatchedEvidence) throw new ClinicalError(409, 'record_integrity_error');
+  }
   return count;
 }
 
@@ -269,38 +311,66 @@ export function startCorrection(db: DatabaseSync, { row, patient }: Chart, actor
   `).run(reason, actor.staffId, time, actor.staffId, time, subjective, objective, assessment, plan, row.encounter_id);
 }
 
-function appendRevision(db: DatabaseSync, encounterId: number, patientId: string, snapshot: SoapContent,
-    revision: number, finalizedBy: number, time: string, reason: string | null, content: RevisionContent, previousHash: string) {
-  const entry: RevisionRow = {
+function revisionRow(encounterId: number, snapshot: SoapContent, revision: number, finalizedBy: number,
+    time: string, reason: string | null, content: RevisionContent): RevisionRow {
+  return {
     ...snapshot, encounter_id: encounterId, revision, previous_revision: revision === 1 ? null : revision - 1,
     finalized_by: finalizedBy, finalized_at: time, correction_reason: reason,
-    content_json: JSON.stringify(content), content_sha256: '',
+    content_json: JSON.stringify(content), content_sha256: '', signature_reference: null,
   };
+}
+
+function appendRevision(db: DatabaseSync, patientId: string, entry: RevisionRow, previousHash: string, evidence?: SignatureEvidence) {
   const hash = digest(patientId, entry, previousHash);
   db.prepare(`
     INSERT INTO clinical_note_revisions(encounter_id, revision, previous_revision, subjective, objective, assessment,
-      plan, finalized_by, finalized_at, correction_reason, content_sha256, content_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(encounterId, revision, entry.previous_revision, entry.subjective, entry.objective, entry.assessment,
-    entry.plan, finalizedBy, time, reason, hash, entry.content_json);
+      plan, finalized_by, finalized_at, correction_reason, content_sha256, content_json, signature_reference)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(entry.encounter_id, entry.revision, entry.previous_revision, entry.subjective, entry.objective, entry.assessment,
+    entry.plan, entry.finalized_by, entry.finalized_at, entry.correction_reason, hash, entry.content_json,
+    evidence ? evidenceDigest(evidence) : null);
+  if (evidence) {
+    db.prepare(`
+      INSERT INTO clinical_revision_signatures(encounter_id, revision, cms_der, request_der, response_der, signer_fingerprint, timestamp_utc)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(entry.encounter_id, entry.revision, evidence.cms, evidence.request, evidence.response,
+      evidence.signerFingerprint, evidence.timestampUtc);
+  }
   return hash;
 }
 
-export function finalizeDraft(db: DatabaseSync, { row, patient }: Chart, actor: Actor, time: string) {
-  const latest = patient.revisions[0];
+export type SignedFinalization = { time: string; payload: Buffer; evidence: SignatureEvidence };
+
+function proposedRevision({ row, patient }: Chart, actor: Actor, time: string) {
   const content: RevisionContent = {
     authorId: actor.id, authorName: actor.name, authorRole: actor.role, enteredBy: row.saved_by,
     enteredByName: row.saved_name, enteredAt: row.saved_at, correctionStartedBy: row.correction_started_by,
     correctionStartedAt: row.correction_started_at, prescriptions: patient.currentPrescriptions,
     labOrders: patient.currentLabOrders, diseases: patient.diseases,
   };
-  const revision = row.finalized_revision + 1;
-  appendRevision(db, row.encounter_id, patient.id, patient.currentSoap, revision,
-    actor.staffId, time, row.correction_reason, content, latest?.sha256Hash ?? '');
+  return revisionRow(row.encounter_id, patient.currentSoap, row.finalized_revision + 1,
+    actor.staffId, time, row.correction_reason, content);
+}
+
+export function prepareRevisionPayload(chart: Chart, actor: Actor, time: string): Buffer {
+  return revisionPayload(chart.patient.id, proposedRevision(chart, actor, time), chart.patient.revisions[0]?.sha256Hash ?? '');
+}
+
+export function finalizeDraft(db: DatabaseSync, chart: Chart, actor: Actor, time: string, signed?: SignedFinalization) {
+  const { row, patient } = chart;
+  if (!signed && db.prepare('SELECT 1 FROM clinical_revision_signatures LIMIT 1').get()) {
+    throw new ClinicalError(503, 'signing_not_configured');
+  }
+  const entry = proposedRevision(chart, actor, signed?.time ?? time);
+  const previousHash = patient.revisions[0]?.sha256Hash ?? '';
+  if (signed && !revisionPayload(patient.id, entry, previousHash).equals(signed.payload)) {
+    throw new ClinicalError(409, 'stale_draft');
+  }
+  appendRevision(db, patient.id, entry, previousHash, signed?.evidence);
   db.prepare(`
     UPDATE clinical_note_drafts SET version = version + 1, is_open = 0, finalized_revision = ?, correction_reason = NULL,
       correction_started_by = NULL, correction_started_at = NULL WHERE encounter_id = ?
-  `).run(revision, row.encounter_id);
+  `).run(entry.revision, row.encounter_id);
   const status = patient.billingCompleted ? 'completed' : 'billing';
   db.prepare('UPDATE encounters SET status = ? WHERE id = ?').run(status, row.encounter_id);
 }
@@ -326,13 +396,13 @@ export function seedClinicalCharts(db: DatabaseSync) {
     }
     let previousHash = '';
     for (const revision of revisions) {
-      previousHash = appendRevision(db, encounterId, patient.id, revision.soap, revision.revisionNumber,
+      previousHash = appendRevision(db, patient.id, revisionRow(encounterId, revision.soap, revision.revisionNumber,
         staffId, revision.timestamp, revision.revisionNumber > 1 ? revision.reasonForRevision : null, {
           authorId: revision.authorId, authorName: revision.authorName, authorRole: revision.authorRole,
           enteredBy: staffId, enteredByName: '初期サンプル記録', enteredAt: revision.timestamp,
           correctionStartedBy: null, correctionStartedAt: null, prescriptions: revision.prescriptions,
           labOrders: revision.labOrders, diseases: revision.diseases ?? null,
-        }, previousHash);
+        }), previousHash);
     }
     db.prepare('UPDATE clinical_note_drafts SET finalized_revision = ? WHERE encounter_id = ?')
       .run(revisions.length, encounterId);

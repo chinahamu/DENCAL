@@ -4,8 +4,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CatalogError, listCatalogs, receiveCatalog, saveCatalog, searchCatalog } from './catalog';
-import { clinicalRoute, handleClinical } from './clinical';
-import { CLINICAL_DB_VERSION, seedClinicalCharts } from './clinicalStore';
+import { clinicalRoute, handleClinical, prepareClinicalSignature } from './clinical';
+import { CLINICAL_DB_VERSION, findEncounterChart, readRevisionSignature, seedClinicalCharts, type Actor, type SignedFinalization } from './clinicalStore';
+import { loadSigningConfig, signRevision, verifyRevisionSignature } from './recordSigning';
 import { ClinicalError, readClinicalInput } from './clinicalInput';
 import type { StaffMember } from '../src/types/emr';
 import { canPerformAction, isEmrAction } from '../src/utils/permissions';
@@ -87,7 +88,7 @@ function openDatabase(path: string, readOnly: boolean) {
   } finally {
     probe.close();
   }
-  if (version === 2 || version === 3) {
+  if (version === 2 || version === 3 || version === 4) {
     const migration = new DatabaseSync(path);
     try {
       migration.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000; BEGIN IMMEDIATE');
@@ -98,6 +99,11 @@ function openDatabase(path: string, readOnly: boolean) {
       if (version === 3) {
         migration.exec(readFileSync(resolve('database/clinical-records.sql'), 'utf8'));
         seedClinicalCharts(migration);
+        migration.exec('PRAGMA user_version = 4');
+        version = 4;
+      }
+      if (version === 4) {
+        migration.exec(readFileSync(resolve('database/clinical-signatures.sql'), 'utf8'));
         migration.exec(`PRAGMA user_version = ${CLINICAL_DB_VERSION}`);
         version = CLINICAL_DB_VERSION;
       }
@@ -113,6 +119,7 @@ function openDatabase(path: string, readOnly: boolean) {
 export function createAuthMiddleware() {
   const path = resolve(process.env.DENCAL_DB || 'data/dencal.sqlite3');
   if (extname(path) !== '.sqlite3') throw new Error('DENCAL_DB には .sqlite3 ファイルを指定してください。');
+  const signing = loadSigningConfig();
   let failedLogins = 0;
   let windowEnd = 0;
 
@@ -201,20 +208,46 @@ export function createAuthMiddleware() {
       if (clinical) {
         if (!canPerformAction(staff.role, clinical.action)) return json(res, 403, { error: 'forbidden' });
         const input = write ? await readClinicalInput(req) : undefined;
-        db.exec(clinicalWrites ? 'BEGIN IMMEDIATE' : 'BEGIN');
-        let result: ReturnType<typeof handleClinical>;
-        try {
-          // Check the current session and department in the same transaction as the chart operation.
-          const actor = currentSession();
-          if (!actor) throw new ClinicalError(401, 'login_required');
-          result = handleClinical(db, clinical, {
-            ...staffMember(actor), staffId: actor.id, databaseRole: actor.role, departmentCode: actor.department_code,
-          }, input, new URLSearchParams(req.url?.split('?')[1]));
-          db.exec('COMMIT');
-        } catch (error) {
-          db.exec('ROLLBACK');
-          throw error;
+        function transaction<T>(writing: boolean, action: (actor: Actor) => T): T {
+          db!.exec(writing ? 'BEGIN IMMEDIATE' : 'BEGIN');
+          try {
+            const actor = currentSession();
+            if (!actor) throw new ClinicalError(401, 'login_required');
+            const staff = staffMember(actor);
+            if (!canPerformAction(staff.role, clinical.action)) throw new ClinicalError(403, 'forbidden');
+            const result = action({
+              ...staff, staffId: actor.id, databaseRole: actor.role, departmentCode: actor.department_code,
+            });
+            db!.exec('COMMIT');
+            return result;
+          } catch (error) {
+            db!.exec('ROLLBACK');
+            throw error;
+          }
         }
+
+        if (clinical.kind === 'signature_check') {
+          const proof = transaction(false, (actor) =>
+            readRevisionSignature(db!, findEncounterChart(db!, actor, clinical.encounterId), clinical.revision));
+          if (!proof) return json(res, 200, { status: 'unsigned' });
+          if (!signing) throw new ClinicalError(503, 'signing_not_configured');
+          const metadata = await verifyRevisionSignature(signing, proof.payload, proof.evidence);
+          // Do not return evidence metadata if access expired while OpenSSL was running.
+          transaction(false, (actor) => { findEncounterChart(db!, actor, clinical.encounterId); });
+          return json(res, 200, { status: 'verified', ...metadata });
+        }
+
+        let signed: SignedFinalization | undefined;
+        if (signing && clinical.kind === 'operation' && clinical.operation === 'finalize') {
+          const candidate = transaction(false, (actor) => ({
+            staffId: actor.id, ...prepareClinicalSignature(db!, actor, clinical.patientId, input),
+          }));
+          // No database lock is held while waiting for the timestamp authority.
+          const evidence = await signRevision(signing, candidate.staffId, candidate.payload);
+          signed = { time: candidate.time, payload: candidate.payload, evidence };
+        }
+        const result = transaction(Boolean(clinicalWrites), (actor) =>
+          handleClinical(db!, clinical, actor, input, new URLSearchParams(req.url?.split('?')[1]), signed));
         return json(res, 200, result);
       }
       if (access && (!isEmrAction(access) || !canPerformAction(staff.role, access))) {

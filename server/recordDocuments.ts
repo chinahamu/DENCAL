@@ -71,6 +71,11 @@ export function finalizedRecordDocument(chart: Chart, revisionNumber: number): F
     ['生年月日', patient.birthDate], ['受診日', row.reception_date], ['受診番号', row.encounter_id],
     ['確定日時（日本時間）', revision.timestamp], ['確定者', `${revision.authorName}（${revision.authorId}）`],
     ...(revision.enteredByName ? [['最終入力', `${revision.enteredByName} · ${revision.enteredAt ?? ''}`]] : []),
+    ['電子署名', revision.electronicSignature ? '確定データに付与済み' : 'なし'],
+    ...(revision.electronicSignature ? [
+      ['タイムスタンプ（UTC）', revision.electronicSignature.timestampUtc],
+      ['署名証明書 SHA-256', revision.electronicSignature.signerFingerprint],
+    ] : []),
     ...(revision.reasonForRevision ? [['訂正理由', revision.reasonForRevision]] : []),
   ];
   const title = `診療録 第${revisionNumber}版`;

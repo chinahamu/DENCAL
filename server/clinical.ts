@@ -7,8 +7,8 @@ import { allergy, ClinicalError, diagnosis, labOrder, object, prescription, regi
 import { finalizedRecordDocument, searchFinalizedRecords } from './recordDocuments';
 import { INITIAL_AUDIT_LOGS, INITIAL_BACKUPS } from './clinicalSeed';
 import {
-  findChart, findEncounterChart, finalizeDraft, GENERAL_DEPARTMENT, insertChart, listCharts, saveDraft, saveWorkspace, startCorrection,
-  type Actor, type Chart,
+  findChart, findEncounterChart, finalizeDraft, prepareRevisionPayload, GENERAL_DEPARTMENT, insertChart, listCharts, saveDraft, saveWorkspace, startCorrection,
+  type Actor, type Chart, type SignedFinalization,
 } from './clinicalStore';
 
 const operations = {
@@ -29,6 +29,7 @@ type Operation = keyof typeof operations;
 type ClinicalRoute =
   | { kind: 'list'; method: 'GET'; action: 'view_chart' }
   | { kind: 'register'; method: 'POST'; action: 'register_patient' }
+  | { kind: 'signature_check'; method: 'GET'; action: 'view_chart'; encounterId: number; revision: number }
   | { kind: 'record_search'; method: 'GET'; action: 'view_chart' }
   | { kind: 'record'; method: 'GET' | 'POST'; action: 'view_chart' | 'export_record'; encounterId: number; revision: number }
   | { kind: 'archive'; method: 'GET'; action: 'export_archive' }
@@ -43,11 +44,12 @@ export function clinicalRoute(path: string, method: string | undefined): Clinica
       : { kind: 'list', method: 'GET', action: 'view_chart' };
   }
   if (path === '/api/clinical/records') return { kind: 'record_search', method: 'GET', action: 'view_chart' };
-  const record = /^\/api\/clinical\/records\/([1-9][0-9]{0,15})\/([1-9][0-9]{0,15})(\/export)?$/.exec(path);
+  const record = /^\/api\/clinical\/records\/([1-9][0-9]{0,15})\/([1-9][0-9]{0,15})(\/export|\/signature)?$/.exec(path);
   if (record) {
     const encounterId = Number(record[1]);
     const revision = Number(record[2]);
     if (!Number.isSafeInteger(encounterId) || !Number.isSafeInteger(revision)) return undefined;
+    if (record[3] === '/signature') return { kind: 'signature_check', method: 'GET', action: 'view_chart', encounterId, revision };
     return { kind: 'record', method: record[3] ? 'POST' : 'GET',
       action: record[3] ? 'export_record' : 'view_chart', encounterId, revision };
   }
@@ -149,14 +151,28 @@ const draftOperations = new Set<Operation>([
   'soap', 'diagnosis', 'prescription', 'remove_prescription', 'lab_order', 'finalize', 'start_correction',
 ]);
 
-function update(db: DatabaseSync, chart: Chart, actor: Actor, operation: Exclude<Operation, 'referral'>, body: unknown) {
-  const { patient, row } = chart;
+function checkDraftVersion(chart: Chart, body: unknown) {
+  const request = object(body);
+  if (!Number.isSafeInteger(request.expectedVersion)) throw new ClinicalError(400, 'invalid_input');
+  if (request.expectedVersion !== chart.row.version) throw new ClinicalError(409, 'stale_draft');
+  return request;
+}
+
+export function prepareClinicalSignature(db: DatabaseSync, actor: Actor, patientId: string, body: unknown) {
+  if (!canPerformAction(actor.role, 'sign_soap')) throw new ClinicalError(403, 'forbidden');
+  const chart = findChart(db, actor, patientId);
+  checkDraftVersion(chart, body);
+  if (chart.patient.isSigned) throw new ClinicalError(409, 'already_finalized');
+  const time = timestamp();
+  return { time, payload: prepareRevisionPayload(chart, actor, time) };
+}
+
+function update(db: DatabaseSync, chart: Chart, actor: Actor, operation: Exclude<Operation, 'referral'>, body: unknown, signed?: SignedFinalization) {
+  const { patient } = chart;
   const time = timestamp();
   const editsDraft = draftOperations.has(operation);
   if (editsDraft) {
-    const request = object(body);
-    if (!Number.isSafeInteger(request.expectedVersion)) throw new ClinicalError(400, 'invalid_input');
-    if (request.expectedVersion !== row.version) throw new ClinicalError(409, 'stale_draft');
+    const request = checkDraftVersion(chart, body);
     if (operation === 'start_correction') {
       if (!patient.isSigned) throw new ClinicalError(409, 'draft_open');
       const reason = requiredText(object(request.data).reason, 4000);
@@ -166,9 +182,9 @@ function update(db: DatabaseSync, chart: Chart, actor: Actor, operation: Exclude
     }
     if (patient.isSigned) throw new ClinicalError(409, 'already_finalized');
     if (operation === 'finalize') {
-      finalizeDraft(db, chart, actor, time);
+      finalizeDraft(db, chart, actor, time, signed);
       const revision = patient.revisions.length + 1;
-      audit(db, actor, revision === 1 ? 'SOAP_SIGN' : 'SOAP_REVISION', `診療録 第${revision}版を確定`, chart);
+      audit(db, actor, revision === 1 ? 'SOAP_SIGN' : 'SOAP_REVISION', `診療録 第${revision}版を確定${signed ? '（電子署名・タイムスタンプ付き）' : ''}`, chart);
       return findChart(db, actor, patient.id).patient;
     }
     body = request.data;
@@ -220,7 +236,7 @@ function update(db: DatabaseSync, chart: Chart, actor: Actor, operation: Exclude
   return findChart(db, actor, patient.id).patient;
 }
 
-export function handleClinical(db: DatabaseSync, route: ClinicalRoute, actor: Actor, body: unknown, params: URLSearchParams) {
+export function handleClinical(db: DatabaseSync, route: Exclude<ClinicalRoute, { kind: 'signature_check' }>, actor: Actor, body: unknown, params: URLSearchParams, signed?: SignedFinalization) {
   if (!canPerformAction(actor.role, route.action)) throw new ClinicalError(403, 'forbidden');
   if (route.kind === 'list') return { patients: listCharts(db, actor) };
   if (route.kind === 'register') return { patient: register(db, actor, body) };
@@ -245,7 +261,7 @@ export function handleClinical(db: DatabaseSync, route: ClinicalRoute, actor: Ac
     return { patient: chart.patient };
   }
   if (route.operation === 'referral') return referral(db, chart, actor, body);
-  return { patient: update(db, chart, actor, route.operation, body) };
+  return { patient: update(db, chart, actor, route.operation, body, signed) };
 }
 
 function toggle<T extends { id: string }>(entries: T[], entry: T): T[] {

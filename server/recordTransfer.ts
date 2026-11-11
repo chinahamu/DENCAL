@@ -11,8 +11,9 @@ function openDatabase(path: string, readOnly: boolean) {
   const db = new DatabaseSync(path, { readOnly });
   try {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA trusted_schema = OFF; PRAGMA foreign_keys = ON');
-    if (db.prepare('PRAGMA user_version').get()?.user_version !== CLINICAL_DB_VERSION) {
-      throw new Error(`診療録の保存に対応した DENCAL のDB（バージョン ${CLINICAL_DB_VERSION}）を指定してください。`);
+    const version = db.prepare('PRAGMA user_version').get()?.user_version;
+    if (version !== 4 && version !== CLINICAL_DB_VERSION) {
+      throw new Error(`診療録の保存に対応した DENCAL のDB（バージョン 4 または ${CLINICAL_DB_VERSION}）を指定してください。`);
     }
     return db;
   } catch (error) {
@@ -30,6 +31,10 @@ function verify(db: DatabaseSync) {
     .all().map((row) => row.name);
   if (!expectedTriggers.every((trigger) => triggers.includes(trigger))) {
     throw new Error('確定版を保護するトリガーがありません。');
+  }
+  if (db.prepare('PRAGMA user_version').get()?.user_version === CLINICAL_DB_VERSION) {
+    const signatures = db.prepare("SELECT count(*) AS total FROM sqlite_schema WHERE type = 'trigger' AND name IN ('clinical_signature_no_update', 'clinical_signature_no_delete', 'clinical_signature_no_replace')").get();
+    if (signatures?.total !== 3) throw new Error('署名証跡を保護するトリガーがありません。');
   }
   try {
     return verifyClinicalStore(db);

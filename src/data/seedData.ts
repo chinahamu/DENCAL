@@ -67,7 +67,7 @@ export const MHLW_COMPLIANCE_ITEMS: MhlwComplianceItem[] = [
     requirement:
       '故意または過失による虚偽入力・書き換え・消去及び混同を防止し、作成の責任の所在（医師等の識別・認証）を明確にすること。',
     implementationDetail:
-      '確定版・訂正理由・SHA-256をSQLiteに保存し、版の整合性を参照時に検証する。電子署名・信頼できるタイムスタンプは実装予定。',
+      '確定版・訂正理由・SHA-256をSQLiteに保存し、版の整合性を参照時に検証する。CMS分離署名・RFC 3161タイムスタンプを設定に応じて取得・検証する。',
     status: 'attention',
   },
   {

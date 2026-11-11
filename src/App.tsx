@@ -101,8 +101,12 @@ export default function App() {
     if (!response.ok) {
       if (response.status === 403 || response.status === 404) throw new Error('対象の操作または患者へのアクセスが許可されていません。');
       if (response.status === 400) throw new Error('入力内容を確認してください。');
-      if (response.status === 409) {
+      if (response.status === 409 || response.status === 503) {
         const { error } = await response.json();
+        if (error === 'signing_not_configured') throw new Error('署名証明書または検証設定を管理者に確認してください。');
+        if (error === 'signing_failed') throw new Error('電子署名またはタイムスタンプに失敗しました。診療録は確定されていません。');
+        if (error === 'signature_verification_failed') throw new Error('電子署名またはタイムスタンプの整合性・信頼性を確認できませんでした。');
+        if (response.status === 503) throw new Error('診療データの処理に失敗しました。接続状態を確認してください。');
         if (error === 'stale_draft') throw new Error('別の操作で診療録が更新されました。入力内容を控え、診療録を再読込してから編集してください。');
         if (error === 'record_integrity_error') throw new Error('確定版の整合性を確認できないため、診療録を開けません。');
         throw new Error('すでに処理されたか、現在の状態では実行できません。');

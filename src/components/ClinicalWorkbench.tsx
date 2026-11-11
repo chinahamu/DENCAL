@@ -1712,6 +1712,11 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                       </span>
                     </div>
 
+                    {rev.electronicSignature && (
+                      <p className="text-xs text-slate-600">
+                        電子署名・タイムスタンプあり（UTC {rev.electronicSignature.timestampUtc}）
+                      </p>
+                    )}
                     <p className="text-xs text-slate-700 font-medium">
                       {rev.reasonForRevision ? `訂正理由 ${rev.reasonForRevision}` : '初版'}
                     </p>

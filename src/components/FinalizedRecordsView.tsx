@@ -21,6 +21,9 @@ export function FinalizedRecordsView({ request, canExport, download }: Props) {
   const [filters, setFilters] = useState('');
   const [selected, setSelected] = useState<FinalizedRecordResult | null>(null);
   const [preview, setPreview] = useState<FinalizedRecordDocument | null>(null);
+  const [signature, setSignature] = useState<
+    { status: 'unsigned' } | { status: 'verified'; timestampUtc: string; signerFingerprint: string } | null
+  >(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const activeRequest = useRef<AbortController | null>(null);
@@ -53,6 +56,7 @@ export function FinalizedRecordsView({ request, canExport, download }: Props) {
       setResult(next);
       setSelected(null);
       setPreview(null);
+      setSignature(null);
     });
   }
 
@@ -70,9 +74,18 @@ export function FinalizedRecordsView({ request, canExport, download }: Props) {
   function openRecord(record: FinalizedRecordResult) {
     setSelected(record);
     setPreview(null);
+    setSignature(null);
     void run(async (signal) => {
       const document = await request<FinalizedRecordDocument>(recordPath(record), signal);
       if (!signal.aborted) setPreview(document);
+    });
+  }
+
+  function checkSignature(record: FinalizedRecordResult) {
+    setSignature(null);
+    void run(async (signal) => {
+      const status = await request<NonNullable<typeof signature>>(recordPath(record) + '/signature', signal);
+      if (!signal.aborted) setSignature(status);
     });
   }
 
@@ -166,6 +179,17 @@ export function FinalizedRecordsView({ request, canExport, download }: Props) {
           <h2 id="record-preview-title" className="font-bold text-slate-900">
             {selected.patientName} · {selected.visitDate} · 第{selected.revision}版
           </h2>
+          <button type="button" className={buttonClass} disabled={busy} onClick={() => checkSignature(selected)}>
+            電子署名・タイムスタンプを検証
+          </button>
+          {signature?.status === 'unsigned' && <p role="status" className="text-sm text-slate-600">この版は電子署名・タイムスタンプなしで確定されています。</p>}
+          {signature?.status === 'verified' && (
+            <div role="status" className="rounded-md border border-teal-200 bg-teal-50 p-3 text-sm text-teal-900">
+              <p className="font-semibold">電子署名・タイムスタンプを検証しました</p>
+              <p>タイムスタンプ（UTC） {signature.timestampUtc}</p>
+              <p className="break-all">署名証明書 SHA-256 {signature.signerFingerprint}</p>
+            </div>
+          )}
           {canExport && (
             <div className="flex flex-wrap items-center gap-2">
               <button type="button" className={buttonClass} disabled={busy} onClick={() => exportRecord(selected, false)}>HTMLを保存</button>
