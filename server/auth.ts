@@ -5,7 +5,7 @@ import { extname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CatalogError, listCatalogs, receiveCatalog, saveCatalog, searchCatalog } from './catalog';
 import { clinicalRoute, handleClinical } from './clinical';
-import { seedClinicalCharts } from './clinicalStore';
+import { CLINICAL_DB_VERSION, seedClinicalCharts } from './clinicalStore';
 import { ClinicalError, readClinicalInput } from './clinicalInput';
 import type { StaffMember } from '../src/types/emr';
 import { canPerformAction, isEmrAction } from '../src/utils/permissions';
@@ -98,15 +98,15 @@ function openDatabase(path: string, readOnly: boolean) {
       if (version === 3) {
         migration.exec(readFileSync(resolve('database/clinical-records.sql'), 'utf8'));
         seedClinicalCharts(migration);
-        migration.exec('PRAGMA user_version = 4');
-        version = 4;
+        migration.exec(`PRAGMA user_version = ${CLINICAL_DB_VERSION}`);
+        version = CLINICAL_DB_VERSION;
       }
       migration.exec('COMMIT');
     } finally {
       migration.close();
     }
   }
-  if (version !== 4) throw new Error('Unsupported database version');
+  if (version !== CLINICAL_DB_VERSION) throw new Error('Unsupported database version');
   return new DatabaseSync(path, { readOnly });
 }
 
@@ -152,7 +152,7 @@ export function createAuthMiddleware() {
 
     let db: DatabaseSync | undefined;
     try {
-      const clinicalWrites = clinical && (write || clinical.kind === 'patient' || clinical.kind === 'archive');
+      const clinicalWrites = clinical && (write || clinical.kind === 'patient' || clinical.kind === 'archive' || clinical.kind === 'record');
       db = openDatabase(path, read && !clinicalWrites);
       db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000');
       const now = Math.floor(Date.now() / 1000);
@@ -209,7 +209,7 @@ export function createAuthMiddleware() {
           if (!actor) throw new ClinicalError(401, 'login_required');
           result = handleClinical(db, clinical, {
             ...staffMember(actor), staffId: actor.id, databaseRole: actor.role, departmentCode: actor.department_code,
-          }, input);
+          }, input, new URLSearchParams(req.url?.split('?')[1]));
           db.exec('COMMIT');
         } catch (error) {
           db.exec('ROLLBACK');

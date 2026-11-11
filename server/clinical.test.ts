@@ -1,18 +1,21 @@
 import assert from 'node:assert/strict';
 import { scryptSync } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import type { FinalizedRecordDocument, FinalizedRecordPage } from '../src/types/records';
 import type { PatientRecord } from '../src/types/emr';
 import { createAuthMiddleware } from './auth';
+import { copyRecordDatabase, verifyRecordDatabase } from './recordTransfer';
 
 test('clinical API preserves authorized drafts and immutable corrections in SQLite', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'dencal-clinical-'));
   const path = join(directory, 'test.sqlite3');
   const db = new DatabaseSync(path);
+  db.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0');
   t.after(() => {
     db.close();
     rmSync(directory, { recursive: true, force: true });
@@ -30,9 +33,9 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
     db.prepare('INSERT INTO staff_credentials(staff_id, salt, password_hash) VALUES (?, ?, ?)').run(lastInsertRowid, salt, digest);
   }
 
-  function startMiddleware() {
+  function startMiddleware(databasePath = path) {
     const previous = process.env.DENCAL_DB;
-    process.env.DENCAL_DB = path;
+    process.env.DENCAL_DB = databasePath;
     try {
       return createAuthMiddleware();
     } finally {
@@ -72,6 +75,11 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
     assert.equal(response.status, 200);
     return (await response.json()).patients.map((patient: { id: string }) => patient.id);
   };
+  const search = async (cookie: string, params: Record<string, string> = {}): Promise<FinalizedRecordPage> => {
+    const response = await request('clinical/records?' + new URLSearchParams(params), cookie);
+    assert.equal(response.status, 200);
+    return response.json() as Promise<FinalizedRecordPage>;
+  };
   const chart = async (route: string, cookie: string): Promise<PatientRecord> => {
     const response = await request(route, cookie);
     assert.equal(response.status, 200);
@@ -79,6 +87,7 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   };
 
   assert.equal((await request(list)).status, 401);
+  assert.equal((await request('clinical/records')).status, 401);
   const clerk = await login('demo-reception');
   const nurse = await login('demo-nurse');
   const doctor = await login('demo-physician');
@@ -111,6 +120,14 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   assert.equal(patient.currentSoap.subjective, '');
   assert.deepEqual(patient.allergies, []);
   assert.equal(patient.isSigned, false);
+  assert.deepEqual((await search(doctor, { q: patient.id })).records, []);
+  assert.deepEqual((await search(doctor, { q: 'PT-000918' })).records, []);
+  const [specialtyRecord] = (await search(admin, { q: 'PT-000918' })).records;
+  assert.ok(specialtyRecord);
+  const outsideRecord = `clinical/records/${specialtyRecord.encounterId}/${specialtyRecord.revision}`;
+  assert.equal((await request(outsideRecord, doctor)).status, 404);
+  assert.equal((await request(outsideRecord + '/export', doctor, {})).status, 404);
+  assert.equal((await request('clinical/records?from=2026-02-30', doctor)).status, 400);
 
   const vitals = { systolicBp: 120, diastolicBp: 80, pulse: 60, temperature: 36.5, spo2: 98, weightKg: 60, bmi: 21 };
   const allergy = { substance: '試験', category: 'other', severity: 'moderate', reaction: '試験' };
@@ -170,9 +187,10 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   assert.equal(correction.isSigned, false);
   assert.equal(correction.correctionReason, '記載誤りの訂正');
   assert.deepEqual(correction.revisions[0], first.revisions[0]);
+  const correctedText = '医師の記録を訂正\n<追記> & 注記';
   const overlappingWrites = await Promise.all([
-    edit('soap', doctor, { subjective: '医師の記録を訂正' }),
-    edit('soap', admin, { subjective: '医師の記録を訂正' }),
+    edit('soap', doctor, { subjective: correctedText }),
+    edit('soap', admin, { subjective: correctedText }),
   ]);
   assert.deepEqual(overlappingWrites.map((response) => response.status).sort(), [200, 409]);
   version += 1;
@@ -184,7 +202,7 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   assert.equal(newRevision.revisions[0].previousHash, first.revisions[0].sha256Hash);
   assert.equal(newRevision.revisions[0].reasonForRevision, '記載誤りの訂正');
   assert.deepEqual(newRevision.revisions[0].prescriptions, []);
-  assert.equal(newRevision.revisions[0].soap.subjective, '医師の記録を訂正');
+  assert.equal(newRevision.revisions[0].soap.subjective, correctedText);
   assert.deepEqual(newRevision.revisions[1], first.revisions[0]);
   middleware = startMiddleware();
   assert.deepEqual((await chart(target, nurse)).revisions, newRevision.revisions);
@@ -212,16 +230,74 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   assert.equal((await request('clinical/admin-demo', doctor)).status, 403);
   assert.equal((await request('clinical/archive', admin)).status, 200);
 
+  const { records: matches, hasNext } = await search(doctor, { q: 'テスト　カンジャ' });
+  assert.equal(hasNext, false);
+  assert.deepEqual(matches.map((entry) => entry.revision), [2, 1]);
+  assert.equal(matches[0].encounterId, encounterId);
+  assert.deepEqual((await search(clerk, { q: newPatient.kanjiName, from: matches[0].visitDate, to: matches[0].visitDate })).records, matches);
+  assert.deepEqual((await search(clerk, { q: newPatient.kanjiName, to: '2000-01-01' })).records, []);
+  assert.deepEqual((await search(clerk, { q: newPatient.kanjiName, page: '2' })).records, []);
+  const record = `clinical/records/${encounterId}`;
+  const document = async (revision: number, cookie: string, output = false): Promise<FinalizedRecordDocument> => {
+    const response = await request(`${record}/${revision}${output ? '/export' : ''}`, cookie, output ? {} : undefined);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('cache-control') ?? '', /no-store/);
+    return response.json() as Promise<FinalizedRecordDocument>;
+  };
+  const originalDocument = await document(1, clerk);
+  assert.match(originalDocument.html, /診療録 第1版/);
+  assert.match(originalDocument.html, /1錠/);
+  assert.doesNotMatch(originalDocument.html, /医師の記録を訂正/);
+  assert.equal((await request(record + '/3', clerk)).status, 404);
+  assert.equal((await request(record + '/1/export', clerk, {})).status, 403);
+  assert.equal((await request(record + '/1/export', doctor, {}, 'http://example.invalid')).status, 403);
+  const correctedDocument = await document(2, doctor, true);
+  assert.equal(correctedDocument.filename, `dencal-record-${encounterId}-v2.html`);
+  assert.match(correctedDocument.html, /<meta charset="utf-8">/);
+  assert.match(correctedDocument.html, /@page \{ size: A4/);
+  assert.match(correctedDocument.html, /訂正理由/);
+  assert.match(correctedDocument.html, /&lt;追記&gt; &amp; 注記/);
+  assert.doesNotMatch(correctedDocument.html, /<追記>/);
+  assert.ok(correctedDocument.html.includes(first.revisions[0].sha256Hash));
+  assert.equal(db.prepare("SELECT count(*) AS total FROM audit_events WHERE clinical_summary = '診療録 第2版を出力'").get()?.total, 1);
+
+  const saved = join(directory, 'saved.sqlite3');
+  const restored = join(directory, 'restored.sqlite3');
+  assert.ok(existsSync(path + '-wal'));
+  assert.equal(copyRecordDatabase(path, saved), 5);
+  assert.equal(verifyRecordDatabase(saved), 5);
+  assert.equal(copyRecordDatabase(saved, restored), 5);
+  assert.throws(() => copyRecordDatabase(saved, path), /既存/);
+  assert.throws(() => copyRecordDatabase(saved, restored), /既存/);
+  if (process.platform !== 'win32') assert.equal(statSync(restored).mode & 0o777, 0o600);
+  assert.ok(Number(db.prepare('SELECT count(*) AS total FROM staff_sessions').get()?.total) > 0);
+
+  middleware = startMiddleware(restored);
+  assert.equal((await request('session', doctor)).status, 401);
+  const restoredDoctor = await login('demo-physician');
+  assert.deepEqual(await search(restoredDoctor, { q: patient.id }), { records: matches, hasNext: false });
+  assert.deepEqual(await document(1, restoredDoctor), originalDocument);
+  assert.deepEqual(await document(2, restoredDoctor), correctedDocument);
+  middleware = startMiddleware();
+
   db.exec("UPDATE staff SET department_id = (SELECT id FROM departments WHERE code = 'demo-specialty') WHERE staff_code = 'demo-physician'");
   assert.deepEqual(await ids(doctor), ['PT-000918']);
   assert.equal((await request(target, doctor)).status, 404);
   assert.equal((await request(target + '/soap', doctor, { subjective: '異動前の患者' })).status, 404);
   assert.equal((await request('logout', doctor, {})).status, 200);
   assert.equal((await request(list, doctor)).status, 401);
+  const trigger = db.prepare("SELECT sql FROM sqlite_schema WHERE name = 'clinical_revision_no_update'").get()?.sql;
+  assert.equal(typeof trigger, 'string');
   db.exec('DROP TRIGGER clinical_revision_no_update');
   db.prepare('UPDATE clinical_note_revisions SET subjective = ? WHERE encounter_id = ? AND revision = 1')
     .run('変更検知テスト', encounterId);
+  db.exec(String(trigger));
   const corrupt = await request(target, admin);
   assert.equal(corrupt.status, 409);
   assert.equal((await corrupt.json()).error, 'record_integrity_error');
+  assert.equal((await request(record + '/2', admin)).status, 409);
+  const rejected = join(directory, 'corrupt-output.sqlite3');
+  assert.throws(() => verifyRecordDatabase(path), /ハッシュ/);
+  assert.throws(() => copyRecordDatabase(path, rejected), /ハッシュ/);
+  assert.equal(existsSync(rejected), false);
 });

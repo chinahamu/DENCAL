@@ -4,9 +4,10 @@ import { CLINIC_INFO } from '../src/data/seedData';
 import type { AuditLogEntry, PatientRecord, UserRole } from '../src/types/emr';
 import { canPerformAction, type EmrAction } from '../src/utils/permissions';
 import { allergy, ClinicalError, diagnosis, labOrder, object, prescription, registration, requiredText, soapPatch, vitals } from './clinicalInput';
+import { finalizedRecordDocument, searchFinalizedRecords } from './recordDocuments';
 import { INITIAL_AUDIT_LOGS, INITIAL_BACKUPS } from './clinicalSeed';
 import {
-  findChart, finalizeDraft, GENERAL_DEPARTMENT, insertChart, listCharts, saveDraft, saveWorkspace, startCorrection,
+  findChart, findEncounterChart, finalizeDraft, GENERAL_DEPARTMENT, insertChart, listCharts, saveDraft, saveWorkspace, startCorrection,
   type Actor, type Chart,
 } from './clinicalStore';
 
@@ -28,6 +29,8 @@ type Operation = keyof typeof operations;
 type ClinicalRoute =
   | { kind: 'list'; method: 'GET'; action: 'view_chart' }
   | { kind: 'register'; method: 'POST'; action: 'register_patient' }
+  | { kind: 'record_search'; method: 'GET'; action: 'view_chart' }
+  | { kind: 'record'; method: 'GET' | 'POST'; action: 'view_chart' | 'export_record'; encounterId: number; revision: number }
   | { kind: 'archive'; method: 'GET'; action: 'export_archive' }
   | { kind: 'admin'; method: 'GET'; action: 'view_audit' }
   | { kind: 'patient'; method: 'GET'; action: 'view_chart'; patientId: string }
@@ -38,6 +41,15 @@ export function clinicalRoute(path: string, method: string | undefined): Clinica
     return method === 'POST'
       ? { kind: 'register', method: 'POST', action: 'register_patient' }
       : { kind: 'list', method: 'GET', action: 'view_chart' };
+  }
+  if (path === '/api/clinical/records') return { kind: 'record_search', method: 'GET', action: 'view_chart' };
+  const record = /^\/api\/clinical\/records\/([1-9][0-9]{0,15})\/([1-9][0-9]{0,15})(\/export)?$/.exec(path);
+  if (record) {
+    const encounterId = Number(record[1]);
+    const revision = Number(record[2]);
+    if (!Number.isSafeInteger(encounterId) || !Number.isSafeInteger(revision)) return undefined;
+    return { kind: 'record', method: record[3] ? 'POST' : 'GET',
+      action: record[3] ? 'export_record' : 'view_chart', encounterId, revision };
   }
   if (path === '/api/clinical/archive') return { kind: 'archive', method: 'GET', action: 'export_archive' };
   if (path === '/api/clinical/admin-demo') return { kind: 'admin', method: 'GET', action: 'view_audit' };
@@ -208,11 +220,20 @@ function update(db: DatabaseSync, chart: Chart, actor: Actor, operation: Exclude
   return findChart(db, actor, patient.id).patient;
 }
 
-export function handleClinical(db: DatabaseSync, route: ClinicalRoute, actor: Actor, body: unknown) {
+export function handleClinical(db: DatabaseSync, route: ClinicalRoute, actor: Actor, body: unknown, params: URLSearchParams) {
   if (!canPerformAction(actor.role, route.action)) throw new ClinicalError(403, 'forbidden');
   if (route.kind === 'list') return { patients: listCharts(db, actor) };
   if (route.kind === 'register') return { patient: register(db, actor, body) };
   if (route.kind === 'admin') return { backups: INITIAL_BACKUPS, auditLogs: auditHistory(db) };
+  if (route.kind === 'record_search') return searchFinalizedRecords(db, actor, params);
+  if (route.kind === 'record') {
+    const chart = findEncounterChart(db, actor, route.encounterId);
+    const document = finalizedRecordDocument(chart, route.revision);
+    const exporting = route.action === 'export_record';
+    audit(db, actor, exporting ? 'DOCUMENT_EXPORT' : 'RECORD_VIEW',
+      `診療録 第${route.revision}版を${exporting ? '出力' : '閲覧'}`, chart);
+    return document;
+  }
   if (route.kind === 'archive') {
     audit(db, actor, 'DOCUMENT_EXPORT', '院内全カルテJSONアーカイブを出力（デモ）');
     return { exportedAt: new Date().toISOString(), clinic: CLINIC_INFO,

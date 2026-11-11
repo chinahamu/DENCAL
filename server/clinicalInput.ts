@@ -53,7 +53,7 @@ function number(value: unknown, min: number, max: number): number {
   return value;
 }
 
-function date(value: unknown): string {
+export function calendarDate(value: unknown): string {
   const input = requiredText(value, 10);
   const parsed = new Date(input + 'T00:00:00Z');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input) || !Number.isFinite(parsed.getTime()) ||
@@ -66,7 +66,7 @@ function masterReference(value: unknown): MasterReference | undefined {
   const input = object(value);
   const itemId = number(input.itemId, 1, Number.MAX_SAFE_INTEGER);
   if (!Number.isInteger(itemId)) invalidInput();
-  return { itemId, code: requiredText(input.code), releaseDate: date(input.releaseDate) };
+  return { itemId, code: requiredText(input.code), releaseDate: calendarDate(input.releaseDate) };
 }
 
 const soapFields = ['subjective', 'objective', 'assessment', 'plan'] as const;
@@ -87,7 +87,7 @@ export function registration(value: unknown): PatientRegistration {
     kanjiName: requiredText(input.kanjiName),
     kanaName: requiredText(input.kanaName),
     sex: choice(input.sex, ['男性', '女性']),
-    birthDate: date(input.birthDate),
+    birthDate: calendarDate(input.birthDate),
     bloodType: string(input.bloodType),
     phone: string(input.phone),
     address: string(input.address),
@@ -131,7 +131,7 @@ export function diagnosis(value: unknown): DiseaseRecord {
     icd10Code: string(input.icd10Code),
     isMain: boolean(input.isMain),
     isChronicDiseaseTarget: boolean(input.isChronicDiseaseTarget),
-    startDate: date(input.startDate),
+    startDate: calendarDate(input.startDate),
     outcome: choice(input.outcome, ['ongoing', 'cured', 'suspected']),
   };
 }

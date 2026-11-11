@@ -10,6 +10,7 @@ const minimum = {
   sign_soap: 'doctor',
   add_prescription: 'doctor',
   export_referral: 'doctor',
+  export_record: 'doctor',
   export_archive: 'admin',
   create_backup: 'admin',
   restore_backup: 'admin',

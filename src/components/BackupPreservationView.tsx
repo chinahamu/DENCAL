@@ -66,10 +66,10 @@ export const BackupPreservationView: React.FC<BackupPreservationViewProps> = ({
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-3">
           <div>
             <h2 className="text-sm font-bold text-slate-900">
-              厚労省ガイドライン「保存性」・BCPランサムウェア対策：3-2-1世代バックアップ体制
+              バックアップ運用のデモ
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              法定保存期間（診療録5年）の完全保護と、サイバー攻撃・災害時の迅速な院内単独復旧（RPO 1時間以内 / RTO 15分以内）を保証します。
+              実際のSQLiteの保存・検証・復元手順はREADMEの「診療録の保存・移行・復元」を参照してください。
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -83,16 +83,11 @@ export const BackupPreservationView: React.FC<BackupPreservationViewProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => {
-                onExportJsonArchive();
-                setActionFeedback(
-                  '標準交換フォーマット（HL7 FHIR / JSON構造化アーカイブ）をローカル端末へエクスポートしました。'
-                );
-              }}
+              onClick={onExportJsonArchive}
               className="px-3 py-1.5 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-md flex items-center gap-1.5 whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5" />
-              標準JSONアーカイブ出力
+              診療デモJSON出力
             </button>
           </div>
         </div>

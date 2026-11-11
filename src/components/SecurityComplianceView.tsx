@@ -33,6 +33,7 @@ const PERMISSION_ROWS: { action: EmrAction; label: string }[] = [
   { action: 'create_backup', label: '暗号化バックアップ作成・整合性検証（保存性）' },
   { action: 'restore_backup', label: 'バックアップ世代からのシステム復元操作' },
   { action: 'export_referral', label: '紹介状の出力' },
+  { action: 'export_record', label: '確定診療録のHTML出力・印刷' },
   { action: 'export_archive', label: '全カルテのデモJSON出力' },
   { action: 'view_audit', label: '安全管理画面・監査証跡の閲覧' },
 ];

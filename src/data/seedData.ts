@@ -85,23 +85,23 @@ export const MHLW_COMPLIANCE_ITEMS: MhlwComplianceItem[] = [
     id: 'MHLW-READ-01',
     pillar: '見読性 (Readability)',
     sectionRef: 'ガイドライン第6.0版 企画管理編 15章 / 経営管理編',
-    title: '緊急時・監査時における即時画面表示および標準様式書面出力',
+    title: '確定診療録の検索・表示・印刷',
     requirement:
       '電子保存された診療録等の内容を、権限を持つ利用者の求めに応じ、直ちに肉眼で見読可能な状態（ディスプレイ表示・書面印刷）にできること。',
     implementationDetail:
-      '院内ローカルDBからミリ秒単位でSOAPカルテ・時系列検査値・処方歴を表示。紹介状（診療情報提供書）・診療明細書・標準JSON出力の即時プレビュー・印刷機能を実装。',
-    status: 'compliant',
+      '患者番号・氏名・受診日で確定版を検索し、UTF-8の印刷用HTMLで表示・出力する。',
+    status: 'attention',
   },
   {
     id: 'MHLW-PRES-01',
     pillar: '保存性 (Preservability)',
     sectionRef: 'ガイドライン第6.0版 システム運用編 11章・18章 (BCP/ランサムウェア対策)',
-    title: '3-2-1ルールに基づくWORM不変バックアップとオフライン世代隔離',
+    title: '診療録の保存・移行・復元',
     requirement:
       '法令で定められた保存期間（診療録5年等）にわたり、滅失・棄損およびサイバー攻撃（ランサムウェア等）から診療データを保護・復旧できること。',
     implementationDetail:
-      '①院内プライマリRAID10、②院内隔離NAS（WORM追記型不変スナップショット）、③夜間オフライン暗号化アーカイブ（AES-256-GCM）の3世代を保持しSHA-256整合性検証を実行。',
-    status: 'compliant',
+      'SQLiteのコピー・検証・新規ファイルへの復元をコマンドで実行できる。世代管理・暗号化・隔離保管は運用上の残件。',
+    status: 'attention',
   },
   {
     id: 'MHLW-GOV-01',

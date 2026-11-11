@@ -4,6 +4,7 @@ import type { DiseaseRecord, LabOrderItem, PatientRecord, PrescriptionItem, Soap
 import { ClinicalError } from './clinicalInput';
 import { INITIAL_PATIENTS } from './clinicalSeed';
 
+export const CLINICAL_DB_VERSION = 4;
 export const GENERAL_DEPARTMENT = 'demo-general';
 
 const seedDepartments: Record<string, string> = {
@@ -181,6 +182,31 @@ export function findChart(db: DatabaseSync, actor: Actor, patientId: string): Ch
     .get(patientId, Number(actor.role === 'admin'), actor.departmentCode) as Row | undefined;
   if (!row) throw new ClinicalError(404, 'not_found');
   return asChart(db, row);
+}
+
+export function findEncounterChart(db: DatabaseSync, actor: Actor, encounterId: number): Chart {
+  const row = db.prepare(chartSelect + ' WHERE e.id = ? AND (? = 1 OR d.code = ?)')
+    .get(encounterId, Number(actor.role === 'admin'), actor.departmentCode) as Row | undefined;
+  if (!row) throw new ClinicalError(404, 'not_found');
+  return asChart(db, row);
+}
+
+export function verifyClinicalStore(db: DatabaseSync): number {
+  const rows = db.prepare(chartSelect).iterate() as Iterable<Row>;
+  let count = 0;
+  for (const row of rows) {
+    asChart(db, row);
+    count++;
+  }
+  const workspaceCount = db.prepare('SELECT count(*) AS total FROM clinical_workspaces').get()?.total;
+  const missingWorkspace = db.prepare(`
+    SELECT encounter_id FROM clinical_note_drafts WHERE encounter_id NOT IN (SELECT encounter_id FROM clinical_workspaces)
+    UNION ALL
+    SELECT encounter_id FROM clinical_note_revisions WHERE encounter_id NOT IN (SELECT encounter_id FROM clinical_workspaces)
+    LIMIT 1
+  `).get();
+  if (workspaceCount !== count || missingWorkspace) throw new ClinicalError(409, 'record_integrity_error');
+  return count;
 }
 
 export function listCharts(db: DatabaseSync, actor: Actor): PatientRecord[] {

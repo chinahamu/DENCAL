@@ -10,6 +10,7 @@ import {
 import { CLINIC_INFO } from './data/seedData';
 import { computePayloadChecksum } from './utils/emrLogic';
 import { CatalogAdmin } from './components/CatalogAdmin';
+import { FinalizedRecordsView } from './components/FinalizedRecordsView';
 import { ClinicalWorkbench } from './components/ClinicalWorkbench';
 import { ReceptionBillingView } from './components/ReceptionBillingView';
 import { BackupPreservationView } from './components/BackupPreservationView';
@@ -18,7 +19,7 @@ import { NewPatientModal } from './components/NewPatientModal';
 import { StaffLogin } from './components/StaffLogin';
 import { canPerformAction, type EmrAction } from './utils/permissions';
 
-type MainNavView = 'workbench' | 'reception_billing' | 'backup_dr' | 'security_audit' | 'catalog';
+type MainNavView = 'workbench' | 'records' | 'reception_billing' | 'backup_dr' | 'security_audit' | 'catalog';
 
 type ClinicalRequest = <T>(path: string, signal: AbortSignal, body?: unknown) => Promise<T>;
 
@@ -420,7 +421,7 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
           DENCAL
         </a>
 
-        {/* Zone 2: 4 concise single-line text navigation links */}
+        {/* Zone 2: Workspace navigation */}
         <nav
           aria-label="メインナビゲーション"
           className="flex items-center gap-6 text-sm font-medium text-slate-600 overflow-x-auto"
@@ -438,6 +439,13 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
             }`}
           >
             外来カルテ診療
+          </a>
+          <a href="#records" onClick={(event) => { event.preventDefault(); setActiveView('records'); }}
+            aria-current={activeView === 'records' ? 'page' : undefined}
+            className={`py-1 whitespace-nowrap shrink-0 ${activeView === 'records'
+              ? 'text-teal-800 font-bold underline underline-offset-8 decoration-2 decoration-teal-700'
+              : 'hover:text-slate-900'}`}>
+            確定診療録
           </a>
           <a
             href="#reception_billing"
@@ -559,6 +567,10 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
             }}
             onExportReferral={handleReferralExport}
           />
+        )}
+
+        {activeView === 'records' && (
+          <FinalizedRecordsView request={clinicalRequest} canExport={can('export_record')} download={downloadFile} />
         )}
 
         {activeView === 'reception_billing' && (
