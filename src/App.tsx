@@ -100,7 +100,12 @@ export default function App() {
     if (!response.ok) {
       if (response.status === 403 || response.status === 404) throw new Error('対象の操作または患者へのアクセスが許可されていません。');
       if (response.status === 400) throw new Error('入力内容を確認してください。');
-      if (response.status === 409) throw new Error('すでに処理されたか、現在の状態では実行できません。');
+      if (response.status === 409) {
+        const { error } = await response.json();
+        if (error === 'stale_draft') throw new Error('別の操作で診療録が更新されました。入力内容を控え、診療録を再読込してから編集してください。');
+        if (error === 'record_integrity_error') throw new Error('確定版の整合性を確認できないため、診療録を開けません。');
+        throw new Error('すでに処理されたか、現在の状態では実行できません。');
+      }
       throw new Error('診療データの処理に失敗しました。接続状態を確認してください。');
     }
     return await response.json() as T;
@@ -127,9 +132,9 @@ interface WorkspaceProps {
 function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: WorkspaceProps) {
   const [activeView, setActiveView] = useState<MainNavView>('workbench');
   const [records, setRecords] = useState<PatientRecord[]>([]);
-  const [soapDrafts, setSoapDrafts] = useState<Record<string, Partial<SoapContent>>>({});
-  const pendingSoap = useRef(new Map<string, number>());
-  const requestNumber = useRef(0);
+  const [soapDrafts, setSoapDrafts] = useState<Record<string, { version: number; patch: Partial<SoapContent> }>>({});
+  const versions = useRef(new Map<string, number>());
+  const versionedOperations = ['diagnosis', 'prescription', 'remove_prescription', 'lab_order', 'start_correction', 'finalize'];
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const requests = useRef(new AbortController());
   const [backups, setBackups] = useState<BackupSnapshot[]>([]);
@@ -141,7 +146,7 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
   const [accessMessage, setAccessMessage] = useState('');
   const can = (action: EmrAction) => canPerformAction(currentStaff.role, action);
   const patients = records.map((patient) => soapDrafts[patient.id]
-    ? { ...patient, isSigned: false, currentSoap: { ...patient.currentSoap, ...soapDrafts[patient.id] } }
+    ? { ...patient, currentSoap: { ...patient.currentSoap, ...soapDrafts[patient.id].patch } }
     : patient);
 
   useEffect(() => {
@@ -149,7 +154,10 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
     requests.current = controller;
     const { signal } = controller;
     clinicalRequest<{ patients: PatientRecord[] }>('patients', signal).then(({ patients }) => {
-      if (!signal.aborted) setRecords(patients);
+      if (!signal.aborted) {
+        versions.current = new Map(patients.map((patient) => [patient.id, patient.draftVersion]));
+        setRecords(patients);
+      }
     }).catch(() => {
       if (!signal.aborted) setAccessMessage('患者一覧を取得できませんでした。');
     }).finally(() => {
@@ -231,40 +239,72 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
   }
 
   function savePatient(patient: PatientRecord) {
+    versions.current.set(patient.id, patient.draftVersion);
     setRecords((previous) => previous.some((entry) => entry.id === patient.id)
       ? previous.map((entry) => entry.id === patient.id ? patient : entry)
       : [patient, ...previous]);
   }
 
-  function handleSelectPatient(patientId: string) {
-    setSelectedPatientId(patientId);
-    void enqueue(async (signal) => {
-      const { patient } = await clinicalRequest<{ patient: PatientRecord }>('patients/' + patientId, signal);
-      savePatient(patient);
-    });
+  function removeLocalDraft(previous: typeof soapDrafts, patientId: string) {
+    const next = { ...previous };
+    delete next[patientId];
+    return next;
   }
 
-  async function changePatient(patientId: string, operation: string, body: unknown): Promise<boolean> {
+  async function reloadPatient(patientId: string, discardDraft = false) {
     return Boolean(await enqueue(async (signal) => {
-      const { patient } = await clinicalRequest<{ patient: PatientRecord }>(`patients/${patientId}/${operation}`, signal, body);
+      const { patient } = await clinicalRequest<{ patient: PatientRecord }>('patients/' + patientId, signal);
       savePatient(patient);
+      if (discardDraft) setSoapDrafts((previous) => removeLocalDraft(previous, patientId));
+      setAccessMessage('');
       return true;
     }));
   }
 
-  async function handleUpdateSoap(patientId: string, soap: Partial<SoapContent>) {
-    const requestId = ++requestNumber.current;
-    pendingSoap.current.set(patientId, requestId);
-    setSoapDrafts((previous) => ({ ...previous, [patientId]: { ...previous[patientId], ...soap } }));
-    await changePatient(patientId, 'soap', soap);
-    if (pendingSoap.current.get(patientId) === requestId) {
-      pendingSoap.current.delete(patientId);
-      setSoapDrafts((previous) => {
-        const next = { ...previous };
-        delete next[patientId];
-        return next;
+  function handleSelectPatient(patientId: string) {
+    setSelectedPatientId(patientId);
+    if (!soapDrafts[patientId]) void reloadPatient(patientId);
+  }
+
+  async function changePatient(patientId: string, operation: string, body: unknown): Promise<boolean> {
+    const expectedVersion = versions.current.get(patientId);
+    return Boolean(await enqueue(async (signal) => {
+      const versioned = versionedOperations.includes(operation);
+      const input = versioned ? { expectedVersion, data: body } : body;
+      const { patient } = await clinicalRequest<{ patient: PatientRecord }>(`patients/${patientId}/${operation}`, signal, input);
+      savePatient(patient);
+      if (versioned) {
+        setSoapDrafts((previous) => previous[patientId]?.version === expectedVersion
+          ? { ...previous, [patientId]: { ...previous[patientId], version: patient.draftVersion } }
+          : previous);
+      }
+      setAccessMessage('');
+      return true;
+    }));
+  }
+
+  function handleUpdateSoap(patientId: string, patch: Partial<SoapContent>) {
+    const version = versions.current.get(patientId);
+    if (version === undefined) return;
+    setSoapDrafts((previous) => ({
+      ...previous, [patientId]: { version: previous[patientId]?.version ?? version, patch: { ...previous[patientId]?.patch, ...patch } },
+    }));
+  }
+
+  async function handleSaveSoap(patientId: string) {
+    const draft = soapDrafts[patientId];
+    if (!draft) return false;
+    return Boolean(await enqueue(async (signal) => {
+      const { patient } = await clinicalRequest<{ patient: PatientRecord }>(`patients/${patientId}/soap`, signal, {
+        expectedVersion: draft.version, data: draft.patch,
       });
-    }
+      savePatient(patient);
+      setSoapDrafts((previous) => previous[patientId] === draft
+        ? removeLocalDraft(previous, patientId)
+        : previous);
+      setAccessMessage('');
+      return true;
+    }));
   }
 
   async function handleRegisterNewPatient(input: PatientRegistration): Promise<boolean> {
@@ -501,11 +541,15 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
             currentStaff={currentStaff}
             onSelectPatient={handleSelectPatient}
             onUpdateSoap={handleUpdateSoap}
+            onSaveSoap={handleSaveSoap}
+            hasUnsavedSoap={(id) => Boolean(soapDrafts[id])}
+            onReloadPatient={(id) => reloadPatient(id, true)}
+            onStartCorrection={(id, reason) => changePatient(id, 'start_correction', { reason })}
             onToggleDiagnosis={(id, item) => changePatient(id, 'diagnosis', item)}
             onAddPrescription={(id, item) => changePatient(id, 'prescription', item)}
             onRemovePrescription={(id, prescriptionId) => changePatient(id, 'remove_prescription', { id: prescriptionId })}
             onToggleLabOrder={(id, item) => changePatient(id, 'lab_order', item)}
-            onSignAndFinalizeChart={(id, reason) => changePatient(id, 'finalize', { reason })}
+            onSignAndFinalizeChart={(id) => changePatient(id, 'finalize', {})}
             onAddVitalSign={(id, item) => changePatient(id, 'vitals', item)}
             onAddAllergy={(id, item) => changePatient(id, 'allergy', item)}
             onOpenNewPatientModal={() => setIsNewPatientModalOpen(true)}
@@ -561,7 +605,7 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
           {CLINIC_INFO.name} · {CLINIC_INFO.address} · {CLINIC_INFO.director}
         </div>
         <div className="tabular-nums">
-          院内向け試作 · 診療デモの変更はサーバー停止時に消えます
+          院内向け試作 · 保存・確定済みの診療録はSQLiteに保存されます
         </div>
       </footer>
 

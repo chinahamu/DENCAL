@@ -25,7 +25,7 @@ interface SecurityComplianceViewProps {
 const PERMISSION_ROWS: { action: EmrAction; label: string }[] = [
   { action: 'view_chart', label: '診療録（カルテ）・検査結果の閲覧（見読性）' },
   { action: 'edit_soap', label: 'SOAP第2号用紙の作成・追記編集' },
-  { action: 'sign_soap', label: 'HPKI電子署名付与・カルテ確定（真正性）' },
+  { action: 'sign_soap', label: '診療録の確定・訂正版の確定' },
   { action: 'add_prescription', label: '処方オーダ・検体検査オーダの発行' },
   { action: 'record_vitals', label: 'バイタルサイン・トリアージ測定値の登録' },
   { action: 'register_patient', label: '新規患者登録・オンライン資格確認受付' },

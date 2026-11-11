@@ -100,7 +100,10 @@ export interface SoapRevision {
   authorId: string;
   authorName: string;
   authorRole: UserRole;
-  hpkiSignatureId: string;
+  hpkiSignatureId?: string;
+  enteredByName?: string;
+  enteredAt?: string;
+  diseases?: DiseaseRecord[];
   reasonForRevision: string;
   soap: SoapContent;
   prescriptions: PrescriptionItem[];
@@ -142,6 +145,10 @@ export interface PatientRecord {
   hpkiCertId?: string;
   currentHash?: string;
   revisions: SoapRevision[];
+  draftVersion?: number;
+  draftSavedAt?: string;
+  draftSavedBy?: string;
+  correctionReason?: string;
   billingCompleted: boolean;
   receiptIssuedAt?: string;
 }
@@ -203,6 +210,8 @@ export interface AuditLogEntry {
   actorRole: UserRole;
   actionType:
     | 'RECORD_VIEW'
+    | 'SOAP_SAVE'
+    | 'SOAP_CORRECTION_START'
     | 'SOAP_SIGN'
     | 'SOAP_REVISION'
     | 'PRESCRIPTION_ADD'

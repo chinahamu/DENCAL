@@ -6,9 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import type { PatientRecord } from '../src/types/emr';
 import { createAuthMiddleware } from './auth';
 
-test('clinical API checks role and patient scope on the server', async (t) => {
+test('clinical API preserves authorized drafts and immutable corrections in SQLite', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'dencal-clinical-'));
   const path = join(directory, 'test.sqlite3');
   const db = new DatabaseSync(path);
@@ -29,11 +30,17 @@ test('clinical API checks role and patient scope on the server', async (t) => {
     db.prepare('INSERT INTO staff_credentials(staff_id, salt, password_hash) VALUES (?, ?, ?)').run(lastInsertRowid, salt, digest);
   }
 
-  const previous = process.env.DENCAL_DB;
-  process.env.DENCAL_DB = path;
-  const middleware = createAuthMiddleware();
-  if (previous === undefined) delete process.env.DENCAL_DB;
-  else process.env.DENCAL_DB = previous;
+  function startMiddleware() {
+    const previous = process.env.DENCAL_DB;
+    process.env.DENCAL_DB = path;
+    try {
+      return createAuthMiddleware();
+    } finally {
+      if (previous === undefined) delete process.env.DENCAL_DB;
+      else process.env.DENCAL_DB = previous;
+    }
+  }
+  let middleware = startMiddleware();
   const server = createServer((req, res) => {
     void middleware(req, res, () => { res.writeHead(404).end(); });
   });
@@ -65,7 +72,7 @@ test('clinical API checks role and patient scope on the server', async (t) => {
     assert.equal(response.status, 200);
     return (await response.json()).patients.map((patient: { id: string }) => patient.id);
   };
-  const chart = async (route: string, cookie: string) => {
+  const chart = async (route: string, cookie: string): Promise<PatientRecord> => {
     const response = await request(route, cookie);
     assert.equal(response.status, 200);
     return (await response.json()).patient;
@@ -77,7 +84,7 @@ test('clinical API checks role and patient scope on the server', async (t) => {
   const doctor = await login('demo-physician');
   const admin = await login('demo-admin');
   const unassigned = await login('other-doctor');
-  assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 3);
+  assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 4);
   assert.deepEqual(await ids(clerk), ['PT-001042', 'PT-001105', 'PT-001089']);
   assert.deepEqual(await ids(unassigned), []);
   assert.equal((await request(general, unassigned)).status, 404);
@@ -111,28 +118,89 @@ test('clinical API checks role and patient scope on the server', async (t) => {
   assert.equal((await request(target + '/allergy', clerk, allergy)).status, 403);
   assert.equal((await request(target + '/vitals', nurse, vitals)).status, 200);
   assert.equal((await request(target + '/allergy', nurse, allergy)).status, 200);
-  assert.equal((await request(target + '/soap', nurse, { subjective: '権限のない入力' })).status, 403);
-  assert.equal((await request(target + '/soap', doctor, { subjective: '医師の記録', isSigned: true })).status, 400);
-  assert.equal((await request(target + '/soap', doctor, { subjective: '医師の記録' })).status, 200);
+  let version = patient.draftVersion;
+  const edit = (operation: string, cookie: string, data: unknown = {}, expectedVersion = version) =>
+    request(target + '/' + operation, cookie, { expectedVersion, data });
+  const successfulEdit = async (operation: string, cookie: string, data?: unknown): Promise<PatientRecord> => {
+    const response = await edit(operation, cookie, data);
+    assert.equal(response.status, 200, `operation ${operation}`);
+    const { patient } = await response.json();
+    assert.equal(patient.draftVersion, version + 1);
+    version = patient.draftVersion;
+    return patient;
+  };
+
+  assert.equal((await edit('soap', nurse, { subjective: '権限のない入力' })).status, 403);
+  assert.equal((await edit('soap', doctor, { subjective: '医師の記録', isSigned: true })).status, 400);
+  const beforeSave = version;
+  await successfulEdit('soap', doctor, { subjective: '医師の記録' });
+  assert.equal((await edit('soap', doctor, { subjective: '古い入力' }, beforeSave)).status, 409);
+
+  middleware = startMiddleware();
+  const draft = await chart(target, doctor);
+  assert.equal(draft.currentSoap.subjective, '医師の記録');
+  assert.equal(draft.draftVersion, version);
+  assert.equal(draft.draftSavedBy, 'demo-physician');
+
   const prescription = {
     id: 'rx-test', drugName: '試験用', dosagePerDay: '1錠', usage: '朝食後', days: 1,
     category: 'internal', genericAllowed: false,
   };
   const lab = { id: 'lab-test', code: 'test', name: '試験用' };
-  assert.equal((await request(target + '/prescription', nurse, prescription)).status, 403);
-  assert.equal((await request(target + '/lab_order', nurse, lab)).status, 403);
-  assert.equal((await request(target + '/prescription', doctor, prescription)).status, 200);
-  assert.equal((await request(target + '/lab_order', doctor, lab)).status, 200);
-  assert.equal((await request(target + '/remove_prescription', nurse, { id: prescription.id })).status, 403);
-  assert.equal((await request(target + '/finalize', nurse, { reason: '試験' })).status, 403);
-  assert.equal((await request(target + '/finalize', doctor, { reason: '試験', authorId: 'demo-admin' })).status, 200);
-  assert.equal((await request(target + '/finalize', doctor, { reason: '重複' })).status, 409);
-  const updated = await chart(target, nurse);
-  assert.equal(updated.revisions[0].authorId, 'demo-physician');
-  assert.equal(updated.revisions[0].soap.subjective, '医師の記録');
-  assert.equal(updated.revisions[0].prescriptions[0].id, prescription.id);
-  assert.equal(updated.revisions[0].labOrders[0].id, lab.id);
-  assert.equal(updated.vitalsHistory[0].pulse, 60);
+  assert.equal((await edit('prescription', nurse, prescription)).status, 403);
+  assert.equal((await edit('lab_order', nurse, lab)).status, 403);
+  await successfulEdit('prescription', doctor, prescription);
+  await successfulEdit('lab_order', doctor, lab);
+  assert.equal((await edit('remove_prescription', nurse, { id: prescription.id })).status, 403);
+  assert.equal((await edit('finalize', nurse)).status, 403);
+  const first = await successfulEdit('finalize', admin, { authorId: 'fake-author' });
+  assert.equal(first.revisions[0].authorId, 'demo-admin');
+  assert.equal(first.revisions[0].enteredByName, 'demo-physician');
+  assert.match(first.revisions[0].sha256Hash, /^[a-f0-9]{64}$/);
+  assert.equal(first.revisions[0].soap.subjective, '医師の記録');
+  assert.equal(first.revisions[0].prescriptions[0].id, prescription.id);
+  assert.equal(first.revisions[0].labOrders[0].id, lab.id);
+  assert.equal(first.vitalsHistory[0].pulse, 60);
+  assert.equal((await edit('finalize', doctor)).status, 409);
+  assert.equal((await edit('soap', doctor, { subjective: '直接書き換え' })).status, 409);
+  assert.equal((await edit('remove_prescription', doctor, { id: prescription.id })).status, 409);
+  assert.equal((await edit('start_correction', doctor, { reason: '  ' })).status, 400);
+  assert.equal((await edit('start_correction', nurse, { reason: '訂正理由' })).status, 403);
+  const correction = await successfulEdit('start_correction', doctor, { reason: '記載誤りの訂正' });
+  assert.equal(correction.isSigned, false);
+  assert.equal(correction.correctionReason, '記載誤りの訂正');
+  assert.deepEqual(correction.revisions[0], first.revisions[0]);
+  const overlappingWrites = await Promise.all([
+    edit('soap', doctor, { subjective: '医師の記録を訂正' }),
+    edit('soap', admin, { subjective: '医師の記録を訂正' }),
+  ]);
+  assert.deepEqual(overlappingWrites.map((response) => response.status).sort(), [200, 409]);
+  version += 1;
+  await successfulEdit('remove_prescription', doctor, { id: prescription.id });
+  middleware = startMiddleware();
+  assert.equal((await chart(target, doctor)).correctionReason, '記載誤りの訂正');
+  const newRevision = await successfulEdit('finalize', doctor);
+  assert.deepEqual(newRevision.revisions.map((entry) => entry.revisionNumber), [2, 1]);
+  assert.equal(newRevision.revisions[0].previousHash, first.revisions[0].sha256Hash);
+  assert.equal(newRevision.revisions[0].reasonForRevision, '記載誤りの訂正');
+  assert.deepEqual(newRevision.revisions[0].prescriptions, []);
+  assert.equal(newRevision.revisions[0].soap.subjective, '医師の記録を訂正');
+  assert.deepEqual(newRevision.revisions[1], first.revisions[0]);
+  middleware = startMiddleware();
+  assert.deepEqual((await chart(target, nurse)).revisions, newRevision.revisions);
+
+  const encounterId = db.prepare(`
+    SELECT e.id FROM encounters e JOIN patients p ON p.id = e.patient_id WHERE p.patient_number = ?
+  `).get(patient.id)!.id;
+  assert.throws(() => db.prepare('UPDATE clinical_note_revisions SET subjective = ? WHERE encounter_id = ?').run('直接変更', encounterId), /immutable/);
+  assert.throws(() => db.prepare('DELETE FROM clinical_note_revisions WHERE encounter_id = ?').run(encounterId), /immutable/);
+  assert.throws(() => db.prepare(`
+    INSERT OR REPLACE INTO clinical_note_revisions
+    SELECT * FROM clinical_note_revisions WHERE encounter_id = ? AND revision = 1
+  `).run(encounterId), /already exists/);
+  const actions = db.prepare('SELECT action FROM audit_events WHERE encounter_id = ? ORDER BY id')
+    .all(encounterId).map((event) => event.action);
+  assert.ok(actions.includes('SOAP_SAVE') && actions.includes('SOAP_CORRECTION_START') && actions.includes('SOAP_REVISION'));
   assert.equal((await request(target + '/settle', clerk, {})).status, 200);
   assert.equal((await request(target + '/settle', clerk, {})).status, 409);
 
@@ -150,4 +218,10 @@ test('clinical API checks role and patient scope on the server', async (t) => {
   assert.equal((await request(target + '/soap', doctor, { subjective: '異動前の患者' })).status, 404);
   assert.equal((await request('logout', doctor, {})).status, 200);
   assert.equal((await request(list, doctor)).status, 401);
+  db.exec('DROP TRIGGER clinical_revision_no_update');
+  db.prepare('UPDATE clinical_note_revisions SET subjective = ? WHERE encounter_id = ? AND revision = 1')
+    .run('変更検知テスト', encounterId);
+  const corrupt = await request(target, admin);
+  assert.equal(corrupt.status, 409);
+  assert.equal((await corrupt.json()).error, 'record_integrity_error');
 });

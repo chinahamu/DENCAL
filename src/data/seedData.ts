@@ -63,12 +63,12 @@ export const MHLW_COMPLIANCE_ITEMS: MhlwComplianceItem[] = [
     id: 'MHLW-AUTH-01',
     pillar: '真正性 (Authenticity)',
     sectionRef: 'ガイドライン第6.0版 企画管理編 15章 / システム運用編 14章',
-    title: 'HPKI電子署名・タイムスタンプ及び確定後カルテの改ざん防止',
+    title: '診療録の保存・確定・訂正',
     requirement:
       '故意または過失による虚偽入力・書き換え・消去及び混同を防止し、作成の責任の所在（医師等の識別・認証）を明確にすること。',
     implementationDetail:
-      'カルテ確定時にHPKI医師資格証ID＋SHA-256ハッシュ連鎖を自動記録。確定後の追記・修正時は過去版を上書きせず「修正理由＋差分履歴（Revision）」を永久保持。',
-    status: 'compliant',
+      '確定版・訂正理由・SHA-256をSQLiteに保存し、版の整合性を参照時に検証する。電子署名・信頼できるタイムスタンプは実装予定。',
+    status: 'attention',
   },
   {
     id: 'MHLW-AUTH-02',

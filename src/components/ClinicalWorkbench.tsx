@@ -57,11 +57,15 @@ interface ClinicalWorkbenchProps {
   currentStaff: StaffMember;
   onSelectPatient: (patientId: string) => void;
   onUpdateSoap: (patientId: string, soap: Partial<SoapContent>) => void;
+  onSaveSoap: (patientId: string) => Promise<boolean>;
+  hasUnsavedSoap: (patientId: string) => boolean;
+  onReloadPatient: (patientId: string) => Promise<boolean>;
+  onStartCorrection: (patientId: string, reason: string) => Promise<boolean>;
   onToggleDiagnosis: (patientId: string, disease: DiseaseRecord) => Promise<boolean>;
   onAddPrescription: (patientId: string, item: PrescriptionItem) => Promise<boolean>;
   onRemovePrescription: (patientId: string, prescriptionId: string) => Promise<boolean>;
   onToggleLabOrder: (patientId: string, labOrder: LabOrderItem) => Promise<boolean>;
-  onSignAndFinalizeChart: (patientId: string, revisionReason: string) => Promise<boolean>;
+  onSignAndFinalizeChart: (patientId: string) => Promise<boolean>;
   onAddVitalSign: (patientId: string, vital: VitalRecord) => Promise<boolean>;
   onAddAllergy: (patientId: string, allergy: AllergyItem) => Promise<boolean>;
   onOpenNewPatientModal: () => void;
@@ -109,6 +113,10 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   currentStaff,
   onSelectPatient,
   onUpdateSoap,
+  onSaveSoap,
+  hasUnsavedSoap,
+  onReloadPatient,
+  onStartCorrection,
   onToggleDiagnosis,
   onAddPrescription,
   onRemovePrescription,
@@ -148,11 +156,14 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
     setRxUsage('');
     setRxAsNeeded(false);
     setOverrideContraConfirm(false);
+    setRevisionReason('');
+    setSignBannerMessage(null);
   }, [selectedPatientId]);
 
   // Revision reason when modifying an already-signed chart
   const [revisionReason, setRevisionReason] = useState<string>('');
   const [signBannerMessage, setSignBannerMessage] = useState<string | null>(null);
+  const [noteBusy, setNoteBusy] = useState(false);
 
   // Quick vital input state
   const [showVitalForm, setShowVitalForm] = useState<boolean>(false);
@@ -205,10 +216,11 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
 
   const hasHardContraindication = drugSafetyWarnings.some((w) => w.severity === 'error');
 
-  const canEditSoap = canPerformAction(currentStaff.role, 'edit_soap');
+  const canEditNote = canPerformAction(currentStaff.role, 'edit_soap');
+  const canEditSoap = canEditNote && !selectedPatient?.isSigned && !noteBusy;
   const canSignSoap = canPerformAction(currentStaff.role, 'sign_soap');
   const canExportReferral = canPerformAction(currentStaff.role, 'export_referral');
-  const canAddRx = canPerformAction(currentStaff.role, 'add_prescription');
+  const canAddRx = canPerformAction(currentStaff.role, 'add_prescription') && !selectedPatient?.isSigned && !noteBusy;
   const canRecordVitals = canPerformAction(currentStaff.role, 'record_vitals');
 
   const canAddDiagnosis = canEditSoap && selectedDisease &&
@@ -270,19 +282,19 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
     setSelectedLab(undefined);
   }
 
-  const handleSignClick = async () => {
-    if (!selectedPatient || !canSignSoap) return;
-    const reason =
-      selectedPatient.revisions.length > 0
-        ? revisionReason.trim() || '検査結果反映・処方内容確定に伴う改訂署名'
-        : '初版カルテ確定およびHPKI医師資格証による電子署名';
-    if (!await onSignAndFinalizeChart(selectedPatient.id, reason)) return;
-    setRevisionReason('');
-    setSignBannerMessage(
-      '診療録のデモ版を確定しました。'
-    );
-    setTimeout(() => setSignBannerMessage(null), 5000);
-  };
+  async function runNoteAction(action: () => Promise<boolean>, message: string) {
+    if (noteBusy) return;
+    setNoteBusy(true);
+    setSignBannerMessage(null);
+    try {
+      if (await action()) {
+        setSignBannerMessage(message);
+        setRevisionReason('');
+      }
+    } finally {
+      setNoteBusy(false);
+    }
+  }
 
   const handleSaveVital = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -557,7 +569,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
           aria-label="患者基本情報・バイタル・臨床サマリ"
           className="bg-white border border-slate-200 rounded-lg p-5 space-y-4"
         >
-          {/* Top Row: Patient Identity, Demographics, Quick Patient Switcher, and HPKI Status */}
+          {/* Top Row: Patient Identity, Demographics, Quick Patient Switcher, and Note Status */}
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-baseline gap-3">
@@ -612,7 +624,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                 <div className="text-right bg-emerald-50/70 border border-emerald-200 px-3.5 py-2 rounded-md">
                   <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-800">
                     <ShieldCheck className="w-4 h-4 shrink-0" />
-                    <span>HPKI電子署名・確定済 (第{selectedPatient.revisions.length}版)</span>
+                    <span>確定済み (第{selectedPatient.revisions.length}版)</span>
                   </div>
                   <p className="text-[11px] font-mono text-slate-500 tabular-nums mt-0.5">
                     SHA-256: {selectedPatient.currentHash?.slice(0, 16)}...
@@ -622,10 +634,10 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                 <div className="text-right bg-amber-50/70 border border-amber-200 px-3.5 py-2 rounded-md">
                   <div className="flex items-center gap-1.5 text-xs font-bold text-amber-800">
                     <FileText className="w-4 h-4 shrink-0" />
-                    <span>診療録 入力中（未署名・第{selectedPatient.revisions.length + 1}版）</span>
+                    <span>{selectedPatient.correctionReason ? '訂正下書き' : '診療録の下書き'}（第{selectedPatient.revisions.length + 1}版）</span>
                   </div>
                   <p className="text-[11px] text-slate-600 mt-0.5">
-                    入力完了後に下部のHPKI署名ボタンで確定してください
+                    下書きを保存してから確定してください
                   </p>
                 </div>
               )}
@@ -1467,41 +1479,54 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
               </div>
             </div>
 
-            {/* HPKI DIGITAL SIGNATURE & AUTHENTICITY BAR */}
-            <div className="pt-4 border-t border-slate-200 bg-slate-50 -mx-5 -mb-5 p-4 rounded-b-lg flex flex-wrap items-center justify-between gap-3">
-              <div className="space-y-1 flex-1 min-w-[260px]">
-                <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                  <ClipboardCheck className="w-4 h-4 text-teal-700" />
-                  <span>
-                    厚労省ガイドライン「真正性」：HPKI電子署名・タイムスタンプ確定
-                  </span>
-                </div>
-                {selectedPatient.revisions.length > 0 ? (
-                  <input
-                    type="text"
-                    value={revisionReason}
-                    onChange={(e) => setRevisionReason(e.target.value)}
-                    placeholder="修正・追記理由を入力（例：採血結果判明に伴うA/P追記）..."
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-slate-300 rounded text-slate-900"
+            <div className="pt-4 border-t border-slate-200 bg-slate-50 -mx-5 -mb-5 p-4 rounded-b-lg space-y-3">
+              <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                <ClipboardCheck className="w-4 h-4 text-teal-700" />
+                診療録の保存・確定
+              </div>
+              {selectedPatient.isSigned && canEditNote && (
+                <label className="block text-xs text-slate-700">
+                  訂正理由
+                  <input type="text" value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)}
+                    maxLength={4000} disabled={noteBusy}
+                    className="mt-1 w-full px-3 py-1.5 bg-white border border-slate-300 rounded"
                   />
-                ) : (
-                  <p className="text-xs text-slate-500">
-                    確定ボタンを押すと、医師資格証（{currentStaff.hpkiCertId || 'HPKI'}）とSHA-256ハッシュ値により変更不可能な版として記録されます。
-                  </p>
+                </label>
+              )}
+              {!selectedPatient.isSigned && (
+                <p className="text-xs text-slate-600">
+                  {selectedPatient.correctionReason && <>訂正理由 {selectedPatient.correctionReason}<br /></>}
+                  {selectedPatient.draftSavedAt && <>最終保存 {selectedPatient.draftSavedAt} · {selectedPatient.draftSavedBy}</>}
+                  {hasUnsavedSoap(selectedPatient.id) && <span className="block font-semibold text-amber-800">未保存のSOAP入力があります。</span>}
+                </p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <button type="button" disabled={noteBusy} className="px-3 py-2 text-xs font-semibold underline disabled:opacity-50"
+                  onClick={() => runNoteAction(() => onReloadPatient(selectedPatient.id), '診療録を再読込しました。')}>
+                  {hasUnsavedSoap(selectedPatient.id) ? '未保存の入力を破棄して再読込' : '診療録を再読込'}
+                </button>
+                {canEditNote && selectedPatient.isSigned && (
+                  <button type="button" disabled={noteBusy || !revisionReason.trim()}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-teal-700 disabled:bg-slate-400 rounded"
+                    onClick={() => runNoteAction(() => onStartCorrection(selectedPatient.id, revisionReason.trim()), '訂正下書きを作成しました。')}>
+                    訂正を開始
+                  </button>
+                )}
+                {canEditNote && !selectedPatient.isSigned && (
+                  <>
+                    <button type="button" disabled={noteBusy || !hasUnsavedSoap(selectedPatient.id)}
+                      className="px-4 py-2 text-xs font-semibold text-teal-800 border border-teal-700 rounded disabled:opacity-50"
+                      onClick={() => runNoteAction(() => onSaveSoap(selectedPatient.id), '下書きを保存しました。')}>
+                      下書きを保存
+                    </button>
+                    <button type="button" disabled={noteBusy || !canSignSoap || hasUnsavedSoap(selectedPatient.id)}
+                      className="px-4 py-2 text-xs font-semibold text-white bg-teal-700 disabled:bg-slate-400 rounded"
+                      onClick={() => runNoteAction(() => onSignAndFinalizeChart(selectedPatient.id), '診療録を確定しました。')}>
+                      {selectedPatient.correctionReason ? '訂正版を確定' : '診療録を確定'}
+                    </button>
+                  </>
                 )}
               </div>
-
-              <button
-                type="button"
-                disabled={!canSignSoap}
-                onClick={handleSignClick}
-                className="px-5 py-2.5 text-sm font-bold text-white bg-teal-700 hover:bg-teal-800 disabled:bg-slate-300 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
-              >
-                <ShieldCheck className="w-4 h-4" />
-                {selectedPatient.isSigned
-                  ? '修正版として再署名・履歴保存 (HPKI)'
-                  : '電子署名してカルテ確定 (HPKI)'}
-              </button>
             </div>
           </div>
         )}
@@ -1640,24 +1665,24 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
           <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
             <div className="border-b border-slate-200 pb-3">
               <h2 className="text-base font-bold text-slate-900">
-                厚労省ガイドライン「真正性」：電子署名・改ざん防止ハッシュ連鎖履歴
+                診療録の確定版履歴
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                確定後のカルテ修正は過去版を上書きせず、修正理由・HPKI署名ID・前版ハッシュを含む不変チェーンとして保存されます。
+                各版に確定者・確定日時・訂正理由を記録し、前版とSHA-256で紐付けます。
               </p>
             </div>
 
             {selectedPatient.revisions.length === 0 ? (
               <div className="p-6 bg-slate-50 border border-slate-200 rounded-md text-center space-y-2">
                 <p className="text-xs text-slate-600">
-                  この患者の診療録はまだ確定署名されていません。
+                  この患者の診療録には確定版がありません。
                 </p>
                 <button
                   type="button"
                   onClick={() => setCenterTab('soap')}
                   className="px-3 py-1.5 text-xs font-semibold text-teal-700 hover:underline"
                 >
-                  SOAPカルテ画面へ戻り電子署名を実行する
+                  SOAPカルテ画面に戻る
                 </button>
               </div>
             ) : (
@@ -1678,7 +1703,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                         </span>
                         <span className="text-slate-400">·</span>
                         <span className="font-medium text-teal-800">
-                          署名医：{rev.authorName} ({rev.hpkiSignatureId})
+                          確定者 {rev.authorName}（{rev.authorId}）
                         </span>
                       </div>
                       <span className="text-xs font-semibold text-emerald-700 flex items-center gap-1">
@@ -1688,9 +1713,12 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                     </div>
 
                     <p className="text-xs text-slate-700 font-medium">
-                      確定・改訂理由：{rev.reasonForRevision}
+                      {rev.reasonForRevision ? `訂正理由 ${rev.reasonForRevision}` : '初版'}
                     </p>
 
+                    {rev.enteredByName && (
+                      <p className="text-xs text-slate-600">最終入力 {rev.enteredByName} · {rev.enteredAt}</p>
+                    )}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs bg-white p-3 rounded border border-slate-200">
                       <div>
                         <span className="font-semibold text-slate-700">S: </span>
@@ -1710,6 +1738,14 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                       </div>
                     </div>
 
+                    <details className="text-xs text-slate-700">
+                      <summary className="cursor-pointer font-semibold">確定時の傷病名・処方・検査</summary>
+                      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 mt-2">
+                        <dt>傷病名</dt><dd>{rev.diseases?.map((item) => item.name).join('、') || (rev.diseases ? 'なし' : '記録なし')}</dd>
+                        <dt>処方</dt><dd>{rev.prescriptions.map((item) => item.drugName).join('、') || 'なし'}</dd>
+                        <dt>検査</dt><dd>{rev.labOrders.map((item) => item.name).join('、') || 'なし'}</dd>
+                      </dl>
+                    </details>
                     <div className="text-[11px] font-mono text-slate-500 tabular-nums space-y-0.5 pt-1">
                       <div>SHA-256 Record Hash : {rev.sha256Hash}</div>
                       <div>Previous Chain Hash : {rev.previousHash}</div>
@@ -1735,12 +1771,13 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
               </div>
               <button
                 type="button"
+                disabled={hasUnsavedSoap(selectedPatient.id)}
                 onClick={async () => {
                   if (await onExportReferral(selectedPatient.id, referralHospital, referralPurpose)) {
                     setPrintPreviewNotif('デモ紹介状のテキストを出力しました。');
                   }
                 }}
-                className="px-3.5 py-2 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                className="px-3.5 py-2 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 disabled:opacity-50 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >
                 <Printer className="w-3.5 h-3.5" />
                 紹介状を確定出力・監査記録

@@ -1,9 +1,14 @@
+import { createHash } from 'node:crypto';
+import type { DatabaseSync } from 'node:sqlite';
 import { CLINIC_INFO } from '../src/data/seedData';
-import type { AuditLogEntry, PatientRecord, StaffMember } from '../src/types/emr';
-import { computePayloadChecksum, computeRecordHash } from '../src/utils/emrLogic';
+import type { AuditLogEntry, PatientRecord, UserRole } from '../src/types/emr';
 import { canPerformAction, type EmrAction } from '../src/utils/permissions';
 import { allergy, ClinicalError, diagnosis, labOrder, object, prescription, registration, requiredText, soapPatch, vitals } from './clinicalInput';
-import { INITIAL_AUDIT_LOGS, INITIAL_BACKUPS, INITIAL_PATIENTS } from './clinicalSeed';
+import { INITIAL_AUDIT_LOGS, INITIAL_BACKUPS } from './clinicalSeed';
+import {
+  findChart, finalizeDraft, GENERAL_DEPARTMENT, insertChart, listCharts, saveDraft, saveWorkspace, startCorrection,
+  type Actor, type Chart,
+} from './clinicalStore';
 
 const operations = {
   soap: 'edit_soap',
@@ -12,6 +17,7 @@ const operations = {
   remove_prescription: 'add_prescription',
   lab_order: 'add_prescription',
   finalize: 'sign_soap',
+  start_correction: 'edit_soap',
   vitals: 'record_vitals',
   allergy: 'record_vitals',
   settle: 'settle_billing',
@@ -26,9 +32,6 @@ type ClinicalRoute =
   | { kind: 'admin'; method: 'GET'; action: 'view_audit' }
   | { kind: 'patient'; method: 'GET'; action: 'view_chart'; patientId: string }
   | { kind: 'operation'; method: 'POST'; action: EmrAction; patientId: string; operation: Operation };
-
-type Actor = Omit<StaffMember, 'departmentCode'> & { departmentCode: string | null };
-type ScopedPatient = { departmentCode: string; patient: PatientRecord };
 
 export function clinicalRoute(path: string, method: string | undefined): ClinicalRoute | undefined {
   if (path === '/api/clinical/patients') {
@@ -47,179 +50,181 @@ export function clinicalRoute(path: string, method: string | undefined): Clinica
   }
 }
 
-const GENERAL = 'demo-general';
-const SPECIALTY = 'demo-specialty';
-const seedDepartments: Record<string, string> = {
-  'PT-001042': GENERAL,
-  'PT-001105': GENERAL,
-  'PT-001089': GENERAL,
-  'PT-000918': SPECIALTY,
-};
-
-function inScope(actor: Actor, entry: ScopedPatient): boolean {
-  return actor.role === 'admin' || actor.departmentCode === entry.departmentCode;
-}
+const roleLabels = {
+  reception: 'clerk', nurse: 'nurse', physician: 'doctor', admin: 'admin',
+} as const satisfies Record<Actor['databaseRole'], UserRole>;
 
 function timestamp(): string {
   return new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' });
 }
 
-export function createClinicalDemo() {
-  const patients = new Map([...INITIAL_PATIENTS].reverse().map((patient) => [
-    patient.id, { departmentCode: seedDepartments[patient.id], patient: structuredClone(patient) },
-  ]));
-  const auditLogs = [...INITIAL_AUDIT_LOGS];
+function audit(db: DatabaseSync, actor: Actor, action: AuditLogEntry['actionType'], summary: string, chart?: Chart) {
+  const time = timestamp();
+  const encounter = chart?.row.encounter_id ?? null;
+  const hash = createHash('sha256').update(JSON.stringify([time, actor.staffId, action, encounter, summary])).digest('hex');
+  db.prepare(`
+    INSERT INTO audit_events(occurred_at, actor_id, actor_role, action, patient_id, encounter_id, outcome,
+      terminal_reference, integrity_sha256, clinical_summary)
+    VALUES (?, ?, ?, ?, (SELECT patient_id FROM encounters WHERE id = ?), ?, 'success', 'loopback', ?, ?)
+  `).run(time, actor.staffId, actor.databaseRole, action, encounter, encounter, hash, summary);
+}
 
-  function audit(actor: Actor, actionType: AuditLogEntry['actionType'], summary: string, patient?: PatientRecord) {
-    const time = timestamp();
-    auditLogs.unshift({
-      id: `AUD-SERVER-${auditLogs.length + 1}`,
-      timestamp: time, actorId: actor.id, actorName: actor.name, actorRole: actor.role, actionType,
-      targetPatientId: patient?.id, targetPatientName: patient?.kanjiName,
-      summary, integrityHash: computePayloadChecksum(`${time}:${actor.id}:${actionType}:${summary}`),
-      ipAddress: 'loopback',
-    });
-  }
+function auditHistory(db: DatabaseSync): AuditLogEntry[] {
+  const events = db.prepare(`
+    SELECT a.id, a.occurred_at, a.actor_role, a.action, a.terminal_reference, a.integrity_sha256, a.clinical_summary,
+      s.staff_code, s.display_name, p.patient_number, p.name
+    FROM audit_events a JOIN staff s ON s.id = a.actor_id LEFT JOIN patients p ON p.id = a.patient_id
+    WHERE a.clinical_summary IS NOT NULL ORDER BY a.id DESC
+  `).all();
+  return [...events.map((row): AuditLogEntry => ({
+    id: `AUD-DB-${row.id}`, timestamp: String(row.occurred_at), actorId: String(row.staff_code),
+    actorName: String(row.display_name), actorRole: roleLabels[row.actor_role as Actor['databaseRole']],
+    actionType: row.action as AuditLogEntry['actionType'], targetPatientId: row.patient_number as string | undefined,
+    targetPatientName: row.name as string | undefined, summary: String(row.clinical_summary),
+    integrityHash: String(row.integrity_sha256), ipAddress: String(row.terminal_reference),
+  })), ...INITIAL_AUDIT_LOGS];
+}
 
-  function register(actor: Actor, body: unknown): PatientRecord {
-    const departmentCode = actor.departmentCode ?? (actor.role === 'admin' ? GENERAL : null);
-    if (!departmentCode) throw new ClinicalError(403, 'forbidden');
-    const input = registration(body);
-    const time = timestamp();
-    const today = time.slice(0, 10);
-    if (input.birthDate > today) throw new ClinicalError(400, 'invalid_input');
-    const age = Number(today.slice(0, 4)) - Number(input.birthDate.slice(0, 4)) -
-      Number(today.slice(5) < input.birthDate.slice(5));
-    let sequence = patients.size + 1;
-    while (patients.has(`PT-REG-${sequence}`)) sequence++;
-    const patient: PatientRecord = {
-      ...input, id: `PT-REG-${sequence}`, age, insurerNumber: '06139912',
-      visitType: '初診', visitStatus: 'waiting', receptionTime: time.slice(11, 16),
-      receptionNumber: `A-${String(sequence).padStart(3, '0')}`,
-      allergies: [], contraindicatedClasses: [], diseases: [], vitalsHistory: [], labHistory: [],
-      currentSoap: { subjective: '', objective: '', assessment: '', plan: '' },
-      currentPrescriptions: [], currentLabOrders: [], isSigned: false, revisions: [], billingCompleted: false,
-    };
-    patients.set(patient.id, { departmentCode, patient });
-    audit(actor, 'PATIENT_REGISTER', '新規来院受付', patient);
-    return patient;
-  }
-
-  function finalize(patient: PatientRecord, actor: Actor, body: unknown) {
-    if (patient.isSigned) throw new ClinicalError(409, 'already_finalized');
-    const reason = requiredText(object(body).reason, 4000);
-    const time = timestamp();
-    const hpkiId = 'DEMO-SIGNATURE';
-    const previousHash = patient.revisions[0]?.sha256Hash ?? 'GENESIS_00000000000000000000000000000000';
-    const hash = computeRecordHash(patient.id, patient.currentSoap, patient.currentPrescriptions,
-      patient.currentLabOrders, hpkiId, time, previousHash);
-    const revisionNumber = patient.revisions.length + 1;
-    patient.revisions.unshift({
-      revisionNumber, timestamp: time, authorId: actor.id, authorName: actor.name, authorRole: actor.role,
-      hpkiSignatureId: hpkiId, reasonForRevision: reason, soap: { ...patient.currentSoap },
-      prescriptions: [...patient.currentPrescriptions], labOrders: [...patient.currentLabOrders],
-      sha256Hash: hash, previousHash,
-    });
-    patient.visitStatus = patient.billingCompleted ? 'completed' : 'billing';
-    patient.isSigned = true;
-    patient.signedAt = time;
-    patient.signedBy = actor.name;
-    patient.hpkiCertId = hpkiId;
-    patient.currentHash = hash;
-    audit(actor, revisionNumber === 1 ? 'SOAP_SIGN' : 'SOAP_REVISION', `SOAP診療録 第${revisionNumber}版確定（デモ）`, patient);
-  }
-
-  function referral(patient: PatientRecord, actor: Actor, body: unknown) {
-    const input = object(body);
-    const hospital = requiredText(input.hospital);
-    const purpose = requiredText(input.purpose, 4000);
-    const content = [
-      '診療情報提供書（操作デモ）', timestamp(), '', hospital, CLINIC_INFO.name, `担当：${actor.name}`, '',
-      `患者：${patient.kanjiName}（${patient.kanaName}）`, `生年月日：${patient.birthDate}`,
-      `傷病名：${patient.diseases.map((entry) => entry.name).join('、')}`, `紹介目的：${purpose}`, '',
-      '病歴および治療経過', patient.currentSoap.subjective, '', '身体所見・検査結果', patient.currentSoap.objective, '',
-      '処方', patient.currentPrescriptions.map((entry) => `${entry.drugName} ${entry.dosagePerDay}`).join(' / ') || 'なし',
-      'アレルギー', patient.allergies.map((entry) => entry.substance).join('、') || 'なし',
-    ].join('\n');
-    audit(actor, 'DOCUMENT_EXPORT', '診療情報提供書を出力（デモ）', patient);
-    return { filename: `dencal-referral-${patient.id}.txt`, content };
-  }
-
-  function update(patient: PatientRecord, actor: Actor, operation: Exclude<Operation, 'referral'>, body: unknown) {
-    switch (operation) {
-      case 'soap':
-        patient.currentSoap = { ...patient.currentSoap, ...soapPatch(body) };
-        patient.isSigned = false;
-        break;
-      case 'diagnosis': {
-        const entry = diagnosis(body);
-        patient.diseases = toggle(patient.diseases, entry);
-        patient.isSigned = false;
-        audit(actor, 'DIAGNOSIS_UPDATE', '登録傷病名を更新', patient);
-        break;
-      }
-      case 'prescription': {
-        const entry = prescription(body);
-        if (patient.currentPrescriptions.some((existing) => existing.id === entry.id)) {
-          throw new ClinicalError(409, 'duplicate_prescription');
-        }
-        patient.currentPrescriptions.push(entry);
-        patient.isSigned = false;
-        audit(actor, 'PRESCRIPTION_ADD', '処方オーダ追加', patient);
-        break;
-      }
-      case 'remove_prescription': {
-        const id = requiredText(object(body).id);
-        patient.currentPrescriptions = patient.currentPrescriptions.filter((entry) => entry.id !== id);
-        patient.isSigned = false;
-        break;
-      }
-      case 'lab_order':
-        patient.currentLabOrders = toggle(patient.currentLabOrders, labOrder(body));
-        patient.isSigned = false;
-        break;
-      case 'finalize':
-        finalize(patient, actor, body);
-        break;
-      case 'vitals':
-        patient.vitalsHistory.unshift(vitals(body, timestamp()));
-        break;
-      case 'allergy':
-        patient.allergies.push(allergy(body));
-        break;
-      case 'settle':
-        if (patient.billingCompleted) throw new ClinicalError(409, 'already_settled');
-        patient.visitStatus = 'completed';
-        patient.billingCompleted = true;
-        patient.receiptIssuedAt = timestamp();
-        audit(actor, 'BILLING_SETTLE', '外来会計精算（デモ）', patient);
-        break;
-    }
-    return patient;
-  }
-
-  return (route: ClinicalRoute, actor: Actor, body: unknown) => {
-    if (!canPerformAction(actor.role, route.action)) throw new ClinicalError(403, 'forbidden');
-    if (route.kind === 'list') {
-      return { patients: Array.from(patients.values()).filter((entry) => inScope(actor, entry)).map((entry) => entry.patient).reverse() };
-    }
-    if (route.kind === 'register') return { patient: register(actor, body) };
-    if (route.kind === 'admin') return { backups: INITIAL_BACKUPS, auditLogs };
-    if (route.kind === 'archive') {
-      audit(actor, 'DOCUMENT_EXPORT', '院内全カルテJSONアーカイブを出力（デモ）');
-      return { exportedAt: new Date().toISOString(), clinic: CLINIC_INFO,
-        patients: Array.from(patients.values(), (entry) => entry.patient), backupsCount: INITIAL_BACKUPS.length };
-    }
-    const entry = patients.get(route.patientId);
-    if (!entry || !inScope(actor, entry)) throw new ClinicalError(404, 'not_found');
-    const { patient } = entry;
-    if (route.kind === 'patient') {
-      audit(actor, 'RECORD_VIEW', '患者カルテを閲覧', patient);
-      return { patient };
-    }
-    if (route.operation === 'referral') return referral(patient, actor, body);
-    return { patient: update(patient, actor, route.operation, body) };
+function register(db: DatabaseSync, actor: Actor, body: unknown): PatientRecord {
+  const departmentCode = actor.departmentCode ?? (actor.role === 'admin' ? GENERAL_DEPARTMENT : null);
+  if (!departmentCode) throw new ClinicalError(403, 'forbidden');
+  const input = registration(body);
+  const time = timestamp();
+  const today = time.slice(0, 10);
+  if (input.birthDate > today) throw new ClinicalError(400, 'invalid_input');
+  let sequence = Number(db.prepare('SELECT coalesce(max(id), 0) + 1 AS next FROM patients').get()!.next);
+  const used = db.prepare(`
+    SELECT 1 FROM patients WHERE patient_number = ?
+    UNION ALL SELECT 1 FROM encounters e JOIN departments d ON d.id = e.department_id
+      WHERE d.code = ? AND e.reception_date = ? AND e.reception_number = ?
+    LIMIT 1
+  `);
+  const receptionNumber = () => `A-${String(sequence).padStart(3, '0')}`;
+  while (used.get(`PT-REG-${sequence}`, departmentCode, today, receptionNumber())) sequence++;
+  const patient: PatientRecord = {
+    ...input, id: `PT-REG-${sequence}`, age: 0, insurerNumber: '06139912',
+    visitType: '初診', visitStatus: 'waiting', receptionTime: time.slice(11, 16), receptionNumber: receptionNumber(),
+    allergies: [], contraindicatedClasses: [], diseases: [], vitalsHistory: [], labHistory: [],
+    currentSoap: { subjective: '', objective: '', assessment: '', plan: '' },
+    currentPrescriptions: [], currentLabOrders: [], isSigned: false, revisions: [], billingCompleted: false,
   };
+  insertChart(db, patient, departmentCode, actor.staffId, time);
+  const chart = findChart(db, actor, patient.id);
+  audit(db, actor, 'PATIENT_REGISTER', '新規来院受付', chart);
+  return chart.patient;
+}
+
+function referral(db: DatabaseSync, chart: Chart, actor: Actor, body: unknown) {
+  const { patient } = chart;
+  const input = object(body);
+  const hospital = requiredText(input.hospital);
+  const purpose = requiredText(input.purpose, 4000);
+  const content = [
+    '診療情報提供書（操作デモ）', timestamp(), '', hospital, CLINIC_INFO.name, `担当：${actor.name}`, '',
+    `患者：${patient.kanjiName}（${patient.kanaName}）`, `生年月日：${patient.birthDate}`,
+    `傷病名：${patient.diseases.map((entry) => entry.name).join('、')}`, `紹介目的：${purpose}`, '',
+    '病歴および治療経過', patient.currentSoap.subjective, '', '身体所見・検査結果', patient.currentSoap.objective, '',
+    '処方', patient.currentPrescriptions.map((entry) => `${entry.drugName} ${entry.dosagePerDay}`).join(' / ') || 'なし',
+    'アレルギー', patient.allergies.map((entry) => entry.substance).join('、') || 'なし',
+  ].join('\n');
+  audit(db, actor, 'DOCUMENT_EXPORT', '診療情報提供書を出力（デモ）', chart);
+  return { filename: `dencal-referral-${patient.id}.txt`, content };
+}
+
+
+// SOAP and orders share a version because they are finalized together.
+const draftOperations = new Set<Operation>([
+  'soap', 'diagnosis', 'prescription', 'remove_prescription', 'lab_order', 'finalize', 'start_correction',
+]);
+
+function update(db: DatabaseSync, chart: Chart, actor: Actor, operation: Exclude<Operation, 'referral'>, body: unknown) {
+  const { patient, row } = chart;
+  const time = timestamp();
+  const editsDraft = draftOperations.has(operation);
+  if (editsDraft) {
+    const request = object(body);
+    if (!Number.isSafeInteger(request.expectedVersion)) throw new ClinicalError(400, 'invalid_input');
+    if (request.expectedVersion !== row.version) throw new ClinicalError(409, 'stale_draft');
+    if (operation === 'start_correction') {
+      if (!patient.isSigned) throw new ClinicalError(409, 'draft_open');
+      const reason = requiredText(object(request.data).reason, 4000);
+      startCorrection(db, chart, actor, reason, time);
+      audit(db, actor, 'SOAP_CORRECTION_START', '診療録の訂正を開始', chart);
+      return findChart(db, actor, patient.id).patient;
+    }
+    if (patient.isSigned) throw new ClinicalError(409, 'already_finalized');
+    if (operation === 'finalize') {
+      finalizeDraft(db, chart, actor, time);
+      const revision = patient.revisions.length + 1;
+      audit(db, actor, revision === 1 ? 'SOAP_SIGN' : 'SOAP_REVISION', `診療録 第${revision}版を確定`, chart);
+      return findChart(db, actor, patient.id).patient;
+    }
+    body = request.data;
+  }
+  switch (operation) {
+    case 'soap':
+      patient.currentSoap = { ...patient.currentSoap, ...soapPatch(body) };
+      audit(db, actor, 'SOAP_SAVE', '診療録の下書きを保存', chart);
+      break;
+    case 'diagnosis': {
+      const entry = diagnosis(body);
+      patient.diseases = toggle(patient.diseases, entry);
+      audit(db, actor, 'DIAGNOSIS_UPDATE', '登録傷病名を更新', chart);
+      break;
+    }
+    case 'prescription': {
+      const entry = prescription(body);
+      if (patient.currentPrescriptions.some((existing) => existing.id === entry.id)) {
+        throw new ClinicalError(409, 'duplicate_prescription');
+      }
+      patient.currentPrescriptions.push(entry);
+      audit(db, actor, 'PRESCRIPTION_ADD', '処方オーダ追加', chart);
+      break;
+    }
+    case 'remove_prescription': {
+      const id = requiredText(object(body).id);
+      patient.currentPrescriptions = patient.currentPrescriptions.filter((entry) => entry.id !== id);
+      break;
+    }
+    case 'lab_order':
+      patient.currentLabOrders = toggle(patient.currentLabOrders, labOrder(body));
+      break;
+    case 'vitals':
+      patient.vitalsHistory.unshift(vitals(body, time));
+      break;
+    case 'allergy':
+      patient.allergies.push(allergy(body));
+      break;
+    case 'settle':
+      if (patient.billingCompleted) throw new ClinicalError(409, 'already_settled');
+      patient.visitStatus = 'completed';
+      patient.billingCompleted = true;
+      patient.receiptIssuedAt = time;
+      audit(db, actor, 'BILLING_SETTLE', '外来会計精算（デモ）', chart);
+      break;
+  }
+  if (operation !== 'soap') saveWorkspace(db, chart);
+  if (editsDraft) saveDraft(db, chart, actor, time);
+  return findChart(db, actor, patient.id).patient;
+}
+
+export function handleClinical(db: DatabaseSync, route: ClinicalRoute, actor: Actor, body: unknown) {
+  if (!canPerformAction(actor.role, route.action)) throw new ClinicalError(403, 'forbidden');
+  if (route.kind === 'list') return { patients: listCharts(db, actor) };
+  if (route.kind === 'register') return { patient: register(db, actor, body) };
+  if (route.kind === 'admin') return { backups: INITIAL_BACKUPS, auditLogs: auditHistory(db) };
+  if (route.kind === 'archive') {
+    audit(db, actor, 'DOCUMENT_EXPORT', '院内全カルテJSONアーカイブを出力（デモ）');
+    return { exportedAt: new Date().toISOString(), clinic: CLINIC_INFO,
+      patients: listCharts(db, actor), backupsCount: INITIAL_BACKUPS.length };
+  }
+  const chart = findChart(db, actor, route.patientId);
+  if (route.kind === 'patient') {
+    audit(db, actor, 'RECORD_VIEW', '患者カルテを閲覧', chart);
+    return { patient: chart.patient };
+  }
+  if (route.operation === 'referral') return referral(db, chart, actor, body);
+  return { patient: update(db, chart, actor, route.operation, body) };
 }
 
 function toggle<T extends { id: string }>(entries: T[], entry: T): T[] {

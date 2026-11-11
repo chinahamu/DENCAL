@@ -4,7 +4,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CatalogError, listCatalogs, receiveCatalog, saveCatalog, searchCatalog } from './catalog';
-import { clinicalRoute, createClinicalDemo } from './clinical';
+import { clinicalRoute, handleClinical } from './clinical';
+import { seedClinicalCharts } from './clinicalStore';
 import { ClinicalError, readClinicalInput } from './clinicalInput';
 import type { StaffMember } from '../src/types/emr';
 import { canPerformAction, isEmrAction } from '../src/utils/permissions';
@@ -86,7 +87,7 @@ function openDatabase(path: string, readOnly: boolean) {
   } finally {
     probe.close();
   }
-  if (version === 2) {
+  if (version === 2 || version === 3) {
     const migration = new DatabaseSync(path);
     try {
       migration.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000; BEGIN IMMEDIATE');
@@ -94,19 +95,24 @@ function openDatabase(path: string, readOnly: boolean) {
         migration.exec(readFileSync(resolve('database/clinical-departments.sql'), 'utf8'));
       }
       version = migration.prepare('PRAGMA user_version').get()?.user_version;
+      if (version === 3) {
+        migration.exec(readFileSync(resolve('database/clinical-records.sql'), 'utf8'));
+        seedClinicalCharts(migration);
+        migration.exec('PRAGMA user_version = 4');
+        version = 4;
+      }
       migration.exec('COMMIT');
     } finally {
       migration.close();
     }
   }
-  if (version !== 3) throw new Error('Unsupported database version');
+  if (version !== 4) throw new Error('Unsupported database version');
   return new DatabaseSync(path, { readOnly });
 }
 
 export function createAuthMiddleware() {
   const path = resolve(process.env.DENCAL_DB || 'data/dencal.sqlite3');
   if (extname(path) !== '.sqlite3') throw new Error('DENCAL_DB には .sqlite3 ファイルを指定してください。');
-  const handleClinical = createClinicalDemo();
   let failedLogins = 0;
   let windowEnd = 0;
 
@@ -146,7 +152,8 @@ export function createAuthMiddleware() {
 
     let db: DatabaseSync | undefined;
     try {
-      db = openDatabase(path, read || Boolean(clinical));
+      const clinicalWrites = clinical && (write || clinical.kind === 'patient' || clinical.kind === 'archive');
+      db = openDatabase(path, read && !clinicalWrites);
       db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000');
       const now = Math.floor(Date.now() / 1000);
       const hash = sessionHash(req);
@@ -187,17 +194,28 @@ export function createAuthMiddleware() {
         WHERE ss.token_hash = ? AND ss.expires_at > ? AND s.active = 1
       `);
       const currentSession = () => hash ? session.get(hash, Math.floor(Date.now() / 1000)) as StaffRow | undefined : undefined;
-      let row = currentSession();
+      const row = currentSession();
       if (!row) return json(res, 401, { error: 'login_required' });
 
       const staff = staffMember(row);
       if (clinical) {
         if (!canPerformAction(staff.role, clinical.action)) return json(res, 403, { error: 'forbidden' });
         const input = write ? await readClinicalInput(req) : undefined;
-        // The request body can arrive after a session expires or an assignment changes.
-        if (write) row = currentSession();
-        if (!row) return json(res, 401, { error: 'login_required' });
-        return json(res, 200, handleClinical(clinical, { ...staffMember(row), departmentCode: row.department_code }, input));
+        db.exec(clinicalWrites ? 'BEGIN IMMEDIATE' : 'BEGIN');
+        let result: ReturnType<typeof handleClinical>;
+        try {
+          // Check the current session and department in the same transaction as the chart operation.
+          const actor = currentSession();
+          if (!actor) throw new ClinicalError(401, 'login_required');
+          result = handleClinical(db, clinical, {
+            ...staffMember(actor), staffId: actor.id, databaseRole: actor.role, departmentCode: actor.department_code,
+          }, input);
+          db.exec('COMMIT');
+        } catch (error) {
+          db.exec('ROLLBACK');
+          throw error;
+        }
+        return json(res, 200, result);
       }
       if (access && (!isEmrAction(access) || !canPerformAction(staff.role, access))) {
         return json(res, 403, { error: 'forbidden' });
