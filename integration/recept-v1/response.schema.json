@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dencal-recept:response:v1",
+  "title": "DENCAL to RECEPT v1 receipt or error",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "integrationId",
+        "bodySha256",
+        "status",
+        "issues"
+      ],
+      "properties": {
+        "integrationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+        },
+        "bodySha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "status": {
+          "enum": [
+            "received",
+            "confirmation_required",
+            "applied",
+            "rejected"
+          ]
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "path"
+            ],
+            "properties": {
+              "code": {
+                "enum": [
+                  "unknown_master_code",
+                  "predecessor_missing",
+                  "predecessor_pending",
+                  "patient_unmatched",
+                  "eligibility_unverified",
+                  "unsupported_billing_rule",
+                  "review_rejected"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 160
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "enum": [
+            "invalid_json",
+            "invalid_payload",
+            "unsupported_schema_version",
+            "payload_too_large",
+            "authentication_required",
+            "source_scope_mismatch",
+            "receipt_not_found",
+            "integration_id_conflict",
+            "transfer_revision_conflict",
+            "patient_binding_conflict",
+            "stale_chart_revision",
+            "encounter_cancelled",
+            "performance_transition_conflict",
+            "temporarily_unavailable",
+            "unsupported_media_type"
+          ]
+        }
+      }
+    }
+  ]
+}

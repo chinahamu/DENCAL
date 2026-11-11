@@ -1,0 +1,697 @@
+{
+  "description": "全件架空。コードの存在・有効期間はこのfixture内のマスターで判定する。",
+  "source": {
+    "facilityId": "9900000001",
+    "senderId": "dencal-fixture"
+  },
+  "master": [
+    {
+      "codeSystem": "recept-diagnosis",
+      "code": "9990001",
+      "from": "2026-11-01",
+      "to": "2026-11-30"
+    },
+    {
+      "codeSystem": "recept-medical-procedure",
+      "code": "199000001",
+      "from": "2026-11-01",
+      "to": "2026-11-30"
+    }
+  ],
+  "messages": {
+    "initial": {
+      "schemaVersion": 1,
+      "integrationId": "fixture-send-1",
+      "facilityId": "9900000001",
+      "senderId": "dencal-fixture",
+      "patientId": "PT-FIXTURE",
+      "encounterId": "encounter-fixture-1",
+      "chartRevision": 2,
+      "transferRevision": 1,
+      "previousTransferRevision": null,
+      "event": "initial",
+      "reason": null,
+      "visitDate": "2026-11-11",
+      "diagnoses": [
+        {
+          "id": "diagnosis-1",
+          "codeSystem": "recept-diagnosis",
+          "code": "9990001",
+          "startDate": "2026-11-11",
+          "isSuspected": false,
+          "isMain": true,
+          "outcome": "ongoing",
+          "master": {
+            "publishedOn": "2026-11-01"
+          }
+        }
+      ],
+      "performances": [
+        {
+          "id": "performance-1",
+          "codeSystem": "recept-medical-procedure",
+          "code": "199000001",
+          "performedOn": "2026-11-12",
+          "quantity": 1,
+          "unit": "回",
+          "status": "performed",
+          "master": {
+            "publishedOn": "2026-11-01",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    },
+    "correction": {
+      "schemaVersion": 1,
+      "integrationId": "fixture-send-2",
+      "facilityId": "9900000001",
+      "senderId": "dencal-fixture",
+      "patientId": "PT-FIXTURE",
+      "encounterId": "encounter-fixture-1",
+      "chartRevision": 3,
+      "transferRevision": 2,
+      "previousTransferRevision": 1,
+      "event": "correction",
+      "reason": "実施数量を訂正",
+      "visitDate": "2026-11-11",
+      "diagnoses": [
+        {
+          "id": "diagnosis-1",
+          "codeSystem": "recept-diagnosis",
+          "code": "9990001",
+          "startDate": "2026-11-11",
+          "isSuspected": false,
+          "isMain": true,
+          "outcome": "ongoing",
+          "master": {
+            "publishedOn": "2026-11-01"
+          }
+        }
+      ],
+      "performances": [
+        {
+          "id": "performance-1",
+          "codeSystem": "recept-medical-procedure",
+          "code": "199000001",
+          "performedOn": "2026-11-12",
+          "quantity": 2,
+          "unit": "回",
+          "status": "performed",
+          "master": {
+            "publishedOn": "2026-11-01",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    },
+    "cancel": {
+      "schemaVersion": 1,
+      "integrationId": "fixture-send-3",
+      "facilityId": "9900000001",
+      "senderId": "dencal-fixture",
+      "patientId": "PT-FIXTURE",
+      "encounterId": "encounter-fixture-1",
+      "chartRevision": 3,
+      "transferRevision": 3,
+      "previousTransferRevision": 2,
+      "event": "cancel",
+      "reason": "受診を取り消す",
+      "visitDate": "2026-11-11",
+      "diagnoses": [],
+      "performances": []
+    },
+    "unknown": {
+      "schemaVersion": 1,
+      "integrationId": "fixture-unknown",
+      "facilityId": "9900000001",
+      "senderId": "dencal-fixture",
+      "patientId": "PT-FIXTURE",
+      "encounterId": "encounter-fixture-unknown",
+      "chartRevision": 2,
+      "transferRevision": 1,
+      "previousTransferRevision": null,
+      "event": "initial",
+      "reason": null,
+      "visitDate": "2026-11-11",
+      "diagnoses": [
+        {
+          "id": "diagnosis-1",
+          "codeSystem": "recept-diagnosis",
+          "code": "9990001",
+          "startDate": "2026-11-11",
+          "isSuspected": false,
+          "isMain": true,
+          "outcome": "ongoing",
+          "master": {
+            "publishedOn": "2026-11-01"
+          }
+        }
+      ],
+      "performances": [
+        {
+          "id": "performance-1",
+          "codeSystem": "recept-medical-procedure",
+          "code": "199999999",
+          "performedOn": "2026-11-12",
+          "quantity": 1,
+          "unit": "回",
+          "status": "performed",
+          "master": {
+            "publishedOn": "2026-11-01",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    },
+    "lineCancel": {
+      "schemaVersion": 1,
+      "integrationId": "fixture-line-cancel",
+      "facilityId": "9900000001",
+      "senderId": "dencal-fixture",
+      "patientId": "PT-FIXTURE",
+      "encounterId": "encounter-fixture-1",
+      "chartRevision": 2,
+      "transferRevision": 2,
+      "previousTransferRevision": 1,
+      "event": "correction",
+      "reason": "実施を取り消す",
+      "visitDate": "2026-11-11",
+      "diagnoses": [
+        {
+          "id": "diagnosis-1",
+          "codeSystem": "recept-diagnosis",
+          "code": "9990001",
+          "startDate": "2026-11-11",
+          "isSuspected": false,
+          "isMain": true,
+          "outcome": "ongoing",
+          "master": {
+            "publishedOn": "2026-11-01"
+          }
+        }
+      ],
+      "performances": [
+        {
+          "id": "performance-1",
+          "codeSystem": "recept-medical-procedure",
+          "code": "199000001",
+          "performedOn": "2026-11-12",
+          "quantity": 1,
+          "unit": "回",
+          "status": "cancelled",
+          "master": {
+            "publishedOn": "2026-11-01",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    }
+  },
+  "variants": {
+    "unknownDiagnosis": {
+      "base": "initial",
+      "changes": {
+        "integrationId": "fixture-unknown-diag",
+        "encounterId": "encounter-fixture-unknown-diag",
+        "diagnoses": [
+          {
+            "id": "diagnosis-1",
+            "codeSystem": "recept-diagnosis",
+            "code": "9999999",
+            "startDate": "2026-11-11",
+            "isSuspected": false,
+            "isMain": true,
+            "outcome": "ongoing",
+            "master": {
+              "publishedOn": "2026-11-01"
+            }
+          }
+        ]
+      }
+    },
+    "expired": {
+      "base": "initial",
+      "changes": {
+        "integrationId": "fixture-expired",
+        "encounterId": "encounter-fixture-expired",
+        "performances": [
+          {
+            "id": "performance-1",
+            "codeSystem": "recept-medical-procedure",
+            "code": "199000001",
+            "performedOn": "2026-12-01",
+            "quantity": 1,
+            "unit": "回",
+            "status": "performed",
+            "master": {
+              "publishedOn": "2026-11-01",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ]
+      }
+    },
+    "otherSource": {
+      "base": "initial",
+      "changes": {
+        "senderId": "dencal-fixture-other",
+        "patientId": "PT-OTHER"
+      }
+    },
+    "renew": {
+      "base": "correction",
+      "changes": {
+        "integrationId": "fixture-send-4",
+        "transferRevision": 4,
+        "previousTransferRevision": 3
+      }
+    },
+    "reactivate": {
+      "base": "initial",
+      "changes": {
+        "integrationId": "fixture-reactivate",
+        "chartRevision": 3,
+        "transferRevision": 3,
+        "previousTransferRevision": 2,
+        "event": "correction",
+        "reason": "実施数量を訂正"
+      }
+    },
+    "holdCorrection": {
+      "base": "initial",
+      "changes": {
+        "integrationId": "fixture-unknown-next",
+        "encounterId": "encounter-fixture-unknown",
+        "transferRevision": 2,
+        "previousTransferRevision": 1,
+        "event": "correction",
+        "reason": "実施コードを訂正"
+      }
+    },
+    "sameRevision": {
+      "base": "initial",
+      "changes": {
+        "integrationId": "fixture-other-id"
+      }
+    },
+    "omitted": {
+      "base": "correction",
+      "changes": {
+        "performances": []
+      }
+    },
+    "otherPatient": {
+      "base": "correction",
+      "changes": {
+        "patientId": "PT-DIFFERENT"
+      }
+    },
+    "oldChart": {
+      "base": "correction",
+      "changes": {
+        "chartRevision": 1
+      }
+    },
+    "futureSchema": {
+      "base": "initial",
+      "changes": {
+        "schemaVersion": 2
+      }
+    },
+    "badDate": {
+      "base": "initial",
+      "changes": {
+        "visitDate": "2026-02-29"
+      }
+    },
+    "extraField": {
+      "base": "initial",
+      "changes": {
+        "soap": "架空の診療メモ"
+      }
+    },
+    "duplicateLines": {
+      "base": "initial",
+      "changes": {
+        "performances": [
+          {
+            "id": "performance-1",
+            "codeSystem": "recept-medical-procedure",
+            "code": "199000001",
+            "performedOn": "2026-11-12",
+            "quantity": 1,
+            "unit": "回",
+            "status": "performed",
+            "master": {
+              "publishedOn": "2026-11-01",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          {
+            "id": "performance-1",
+            "codeSystem": "recept-medical-procedure",
+            "code": "199000001",
+            "performedOn": "2026-11-12",
+            "quantity": 1,
+            "unit": "回",
+            "status": "performed",
+            "master": {
+              "publishedOn": "2026-11-01",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ]
+      }
+    },
+    "blankReason": {
+      "base": "correction",
+      "changes": {
+        "reason": "　 "
+      }
+    },
+    "badPredecessor": {
+      "base": "correction",
+      "changes": {
+        "transferRevision": 3
+      }
+    },
+    "zeroQuantity": {
+      "base": "initial",
+      "changes": {
+        "performances": [
+          {
+            "id": "performance-1",
+            "codeSystem": "recept-medical-procedure",
+            "code": "199000001",
+            "performedOn": "2026-11-12",
+            "quantity": 0,
+            "unit": "回",
+            "status": "performed",
+            "master": {
+              "publishedOn": "2026-11-01",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ]
+      }
+    },
+    "initialCancelled": {
+      "base": "lineCancel",
+      "changes": {
+        "integrationId": "fixture-send-1",
+        "transferRevision": 1,
+        "previousTransferRevision": null,
+        "event": "initial",
+        "reason": null
+      }
+    },
+    "afterGap": {
+      "base": "correction",
+      "changes": {
+        "integrationId": "fixture-gap-next",
+        "transferRevision": 3,
+        "previousTransferRevision": 2
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "正常受信",
+      "message": "initial",
+      "history": [],
+      "httpStatus": 202,
+      "status": "received",
+      "issues": []
+    },
+    {
+      "name": "同じ本文の再送",
+      "message": "initial",
+      "history": [
+        "initial"
+      ],
+      "httpStatus": 200,
+      "status": "received",
+      "issues": []
+    },
+    {
+      "name": "同じIDで空白だけ異なる本文",
+      "message": "initial",
+      "history": [
+        "initial"
+      ],
+      "httpStatus": 409,
+      "error": "integration_id_conflict",
+      "suffix": "\n"
+    },
+    {
+      "name": "同じ版に別IDを付けた送信",
+      "message": "sameRevision",
+      "history": [
+        "initial"
+      ],
+      "httpStatus": 409,
+      "error": "transfer_revision_conflict"
+    },
+    {
+      "name": "数量の訂正",
+      "message": "correction",
+      "history": [
+        "initial"
+      ],
+      "httpStatus": 202,
+      "status": "received",
+      "issues": []
+    },
+    {
+      "name": "実施明細だけの取消",
+      "message": "lineCancel",
+      "history": [
+        "initial"
+      ],
+      "httpStatus": 202,
+      "status": "received",
+      "issues": []
+    },
+    {
+      "name": "取消明細はマスターがなくても受信",
+      "message": "lineCancel",
+      "history": [
+        "initial"
+      ],
+      "httpStatus": 202,
+      "status": "received",
+      "issues": [],
+      "omitProcedureMaster": true
+    },
+    {
+      "name": "明細の暗黙の消去",
+      "message": "omitted",
+      "history": [
+        "initial"
+      ],
+      "httpStatus": 409,
+      "error": "performance_transition_conflict"
+    },
+    {
+      "name": "取消明細の再有効化",
+      "message": "reactivate",
+      "history": [
+        "initial",
+        "lineCancel"
+      ],
+      "httpStatus": 409,
+      "error": "performance_transition_conflict"
+    },
+    {
+      "name": "受診全体の取消",
+      "message": "cancel",
+      "history": [
+        "initial",
+        "correction"
+      ],
+      "httpStatus": 202,
+      "status": "received",
+      "issues": []
+    },
+    {
+      "name": "受診取消後の追送",
+      "message": "renew",
+      "history": [
+        "initial",
+        "correction",
+        "cancel"
+      ],
+      "httpStatus": 409,
+      "error": "encounter_cancelled"
+    },
+    {
+      "name": "未知の診療行為コード",
+      "message": "unknown",
+      "history": [],
+      "httpStatus": 202,
+      "status": "confirmation_required",
+      "issues": [
+        {
+          "code": "unknown_master_code",
+          "path": "/performances/0/code"
+        }
+      ]
+    },
+    {
+      "name": "未知の傷病名コード",
+      "message": "unknownDiagnosis",
+      "history": [],
+      "httpStatus": 202,
+      "status": "confirmation_required",
+      "issues": [
+        {
+          "code": "unknown_master_code",
+          "path": "/diagnoses/0/code"
+        }
+      ]
+    },
+    {
+      "name": "マスター有効期間外",
+      "message": "expired",
+      "history": [],
+      "httpStatus": 202,
+      "status": "confirmation_required",
+      "issues": [
+        {
+          "code": "unknown_master_code",
+          "path": "/performances/0/code"
+        }
+      ]
+    },
+    {
+      "name": "先行版未受信",
+      "message": "correction",
+      "history": [],
+      "httpStatus": 202,
+      "status": "confirmation_required",
+      "issues": [
+        {
+          "code": "predecessor_missing",
+          "path": "/previousTransferRevision"
+        }
+      ]
+    },
+    {
+      "name": "先行版の未知コードを訂正できる",
+      "message": "holdCorrection",
+      "history": [
+        "unknown"
+      ],
+      "httpStatus": 202,
+      "status": "received",
+      "issues": []
+    },
+    {
+      "name": "先行版の版順が未確定",
+      "message": "afterGap",
+      "history": [
+        "correction"
+      ],
+      "httpStatus": 202,
+      "status": "confirmation_required",
+      "issues": [
+        {
+          "code": "predecessor_pending",
+          "path": "/previousTransferRevision"
+        }
+      ]
+    },
+    {
+      "name": "患者紐付けの変更",
+      "message": "otherPatient",
+      "history": [
+        "initial"
+      ],
+      "httpStatus": 409,
+      "error": "patient_binding_conflict"
+    },
+    {
+      "name": "カルテ版の逆行",
+      "message": "oldChart",
+      "history": [
+        "initial"
+      ],
+      "httpStatus": 409,
+      "error": "stale_chart_revision"
+    },
+    {
+      "name": "認証済み送信元との不一致",
+      "message": "otherSource",
+      "history": [],
+      "httpStatus": 403,
+      "error": "source_scope_mismatch"
+    },
+    {
+      "name": "別送信元の同じIDは衝突しない",
+      "message": "initial",
+      "history": [
+        "otherSource"
+      ],
+      "httpStatus": 202,
+      "status": "received",
+      "issues": []
+    },
+    {
+      "name": "未対応スキーマ版",
+      "message": "futureSchema",
+      "history": [],
+      "httpStatus": 400,
+      "error": "unsupported_schema_version"
+    },
+    {
+      "name": "存在しない日付",
+      "message": "badDate",
+      "history": [],
+      "httpStatus": 400,
+      "error": "invalid_payload"
+    },
+    {
+      "name": "許可外の診療メモ",
+      "message": "extraField",
+      "history": [],
+      "httpStatus": 400,
+      "error": "invalid_payload"
+    },
+    {
+      "name": "明細IDの重複",
+      "message": "duplicateLines",
+      "history": [],
+      "httpStatus": 400,
+      "error": "invalid_payload"
+    },
+    {
+      "name": "訂正理由が空白",
+      "message": "blankReason",
+      "history": [],
+      "httpStatus": 400,
+      "error": "invalid_payload"
+    },
+    {
+      "name": "版番号に欠番",
+      "message": "badPredecessor",
+      "history": [],
+      "httpStatus": 400,
+      "error": "invalid_payload"
+    },
+    {
+      "name": "数量がゼロ",
+      "message": "zeroQuantity",
+      "history": [],
+      "httpStatus": 400,
+      "error": "invalid_payload"
+    },
+    {
+      "name": "初回の取消済み明細",
+      "message": "initialCancelled",
+      "history": [],
+      "httpStatus": 400,
+      "error": "invalid_payload"
+    }
+  ]
+}

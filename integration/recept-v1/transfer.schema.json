@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dencal-recept:transfer:v1",
+  "title": "DENCAL to RECEPT encounter transfer v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "integrationId",
+    "facilityId",
+    "senderId",
+    "patientId",
+    "encounterId",
+    "chartRevision",
+    "transferRevision",
+    "previousTransferRevision",
+    "event",
+    "reason",
+    "visitDate",
+    "diagnoses",
+    "performances"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "integrationId": {
+      "$ref": "#/$defs/id"
+    },
+    "facilityId": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 10,
+      "pattern": "^[0-9]{10}$"
+    },
+    "senderId": {
+      "$ref": "#/$defs/id"
+    },
+    "patientId": {
+      "$ref": "#/$defs/id"
+    },
+    "encounterId": {
+      "$ref": "#/$defs/id"
+    },
+    "chartRevision": {
+      "$ref": "#/$defs/revision"
+    },
+    "transferRevision": {
+      "$ref": "#/$defs/revision"
+    },
+    "previousTransferRevision": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/revision"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "event": {
+      "enum": [
+        "initial",
+        "correction",
+        "cancel"
+      ]
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "visitDate": {
+      "$ref": "#/$defs/date"
+    },
+    "diagnoses": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/diagnosis"
+      }
+    },
+    "performances": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/performance"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "date": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 10,
+      "format": "date",
+      "pattern": "^(?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "master": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publishedOn"
+      ],
+      "properties": {
+        "publishedOn": {
+          "$ref": "#/$defs/date"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "diagnosis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "codeSystem",
+        "code",
+        "startDate",
+        "isSuspected",
+        "isMain",
+        "outcome",
+        "master"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "codeSystem": {
+          "const": "recept-diagnosis"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^[0-9]{7}$"
+        },
+        "startDate": {
+          "$ref": "#/$defs/date"
+        },
+        "isSuspected": {
+          "type": "boolean"
+        },
+        "isMain": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "ongoing",
+            "cured",
+            "discontinued",
+            "transferred",
+            "unknown"
+          ]
+        },
+        "master": {
+          "$ref": "#/$defs/master"
+        }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "codeSystem",
+        "code",
+        "performedOn",
+        "quantity",
+        "unit",
+        "status",
+        "master"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "codeSystem": {
+          "const": "recept-medical-procedure"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 9,
+          "maxLength": 9,
+          "pattern": "^1[0-9]{8}$"
+        },
+        "performedOn": {
+          "$ref": "#/$defs/date"
+        },
+        "quantity": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "\\S"
+        },
+        "status": {
+          "enum": [
+            "performed",
+            "cancelled"
+          ]
+        },
+        "master": {
+          "$ref": "#/$defs/master"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "initial"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "transferRevision": {
+            "const": 1
+          },
+          "previousTransferRevision": {
+            "type": "null"
+          },
+          "reason": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "correction"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "transferRevision": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 2147483647
+          },
+          "previousTransferRevision": {
+            "$ref": "#/$defs/revision"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "cancel"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "transferRevision": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 2147483647
+          },
+          "previousTransferRevision": {
+            "$ref": "#/$defs/revision"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "\\S"
+          },
+          "diagnoses": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "performances": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ]
+}
