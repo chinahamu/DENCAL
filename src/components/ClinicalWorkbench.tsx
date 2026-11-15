@@ -47,6 +47,7 @@ import {
 import type { CatalogEntry } from '../types/catalog';
 import { ReceptTransferView } from './ReceptTransferView';
 import { ClinicalCatalogPicker } from './ClinicalCatalogPicker';
+import { DrugSafetyPanel } from './DrugSafetyPanel';
 
 function masterReference(entry: CatalogEntry): MasterReference {
   return { itemId: entry.id, code: entry.code, releaseDate: entry.releaseDate };
@@ -140,6 +141,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
 
   const [selectedDisease, setSelectedDisease] = useState<CatalogEntry>();
   const [selectedDrug, setSelectedDrug] = useState<CatalogEntry>();
+  const [safetyRxId, setSafetyRxId] = useState<string | null>(null);
   const [selectedLab, setSelectedLab] = useState<CatalogEntry>();
   const [suspected, setSuspected] = useState(false);
   const [rxDays, setRxDays] = useState('');
@@ -152,6 +154,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   useEffect(() => {
     setSelectedDisease(undefined);
     setSelectedDrug(undefined);
+    setSafetyRxId(null);
     setSelectedLab(undefined);
     setSuspected(false);
     setRxDays('');
@@ -218,6 +221,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   }, [selectedDrug, selectedPatient]);
 
   const hasHardContraindication = drugSafetyWarnings.some((w) => w.severity === 'error');
+  const safetyRx = selectedPatient?.currentPrescriptions.find((rx) => rx.id === safetyRxId);
 
   const canEditNote = canPerformAction(currentStaff.role, 'edit_soap');
   const canEditSoap = canEditNote && !selectedPatient?.isSigned && !noteBusy;
@@ -1364,6 +1368,10 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                               <div className="text-[11px] text-slate-500 font-mono tabular-nums">
                                 {rx.master ? `レセ電算 ${rx.master.code}${rx.priceCode ? ` · 薬価基準 ${rx.priceCode}` : ''}` : `YJ:${rx.yjCode}`}
                               </div>
+                              <button type="button" onClick={() => setSafetyRxId((current) => current === rx.id ? null : rx.id)}
+                                className="mt-1 text-xs text-blue-800 underline" aria-expanded={safetyRxId === rx.id}>
+                                {safetyRxId === rx.id ? '安全性情報を閉じる' : '安全性情報'}
+                              </button>
                             </td>
                             <td className="py-2.5 px-3 text-slate-800 font-medium">
                               {rx.dosagePerDay} · {rx.usage}
@@ -1394,8 +1402,11 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                   </div>
                 )}
 
+                {safetyRx && <DrugSafetyPanel key={safetyRx.id} yjCode={safetyRx.priceCode || safetyRx.yjCode} drugName={safetyRx.drugName} />}
+
                 {canAddRx && <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md space-y-2.5">
                   <ClinicalCatalogPicker key={selectedPatient.id} kind="drug" value={selectedDrug} onSelect={selectDrug} />
+                  {selectedDrug && <DrugSafetyPanel key={selectedDrug.id} yjCode={selectedDrug.priceCode} drugName={selectedDrug.name} />}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                     <label className="grid gap-1">用量{selectedDrug?.unit ? `（規格単位 ${selectedDrug.unit}）` : ''}
                       <input className="rounded border border-slate-300 bg-white px-2 py-1.5" value={rxDosage}
@@ -1417,7 +1428,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                     <button type="button" disabled={!canSubmitRx} onClick={handleAddPrescriptionClick}
                       className="rounded bg-teal-800 px-2.5 py-1.5 text-white disabled:opacity-50">処方追加</button>
                   </div>
-                  <p className="text-xs text-slate-600">マスターは名称・規格の参照用です。照合は薬剤名と同一薬剤の重複候補に限られます。禁忌・相互作用・腎機能別用量は確認できません。</p>
+                  <p className="text-xs text-slate-600">マスターは名称・規格の参照用です。下の警告は薬剤名などの簡易チェックです。PMDA電子添文を参照表示できますが、禁忌・相互作用・腎機能別用量の自動判定は未実装です。</p>
 
                   {/* Real-time Drug Safety Warnings */}
                   {drugSafetyWarnings.length > 0 && (

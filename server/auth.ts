@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CatalogError, listCatalogs, receiveCatalog, saveCatalog, searchCatalog } from './catalog';
+import { readDrugSafety } from './drugSafety';
 import { clinicalRoute, finishReceptDelivery, handleClinical, prepareClinicalSignature, startReceptDelivery } from './clinical';
 import { CLINICAL_DB_VERSION, findEncounterChart, readRevisionSignature, seedClinicalCharts, type Actor, type SignedFinalization } from './clinicalStore';
 import { sendRecept } from './receptOutbox';
@@ -137,10 +138,11 @@ export function createAuthMiddleware() {
     if (!loopbackHost.test(host) || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')) return json(res, 403, { error: 'forbidden' });
 
     const access = /^\/api\/access\/([a-z_]+)$/.exec(route)?.[1];
+    const safetySearch = route === '/api/drug-safety';
     const catalogSearch = route === '/api/catalog/search';
     const catalog = route === '/api/catalog';
     const clinical = clinicalRoute(route, req.method);
-    const read = clinical?.method === 'GET' || catalogSearch || (catalog && req.method !== 'POST') || route === '/api/session' || (access !== undefined && isEmrAction(access));
+    const read = clinical?.method === 'GET' || safetySearch || catalogSearch || (catalog && req.method !== 'POST') || route === '/api/session' || (access !== undefined && isEmrAction(access));
     const write = clinical?.method === 'POST' || (catalog && req.method === 'POST') || route === '/api/login' || route === '/api/logout';
     if (!read && !write) return json(res, 404, { error: 'not_found' });
     if (req.method !== (read ? 'GET' : 'POST')) {
@@ -265,6 +267,11 @@ export function createAuthMiddleware() {
         const result = transaction(Boolean(clinicalWrites), (actor) =>
           handleClinical(db!, clinical, actor, input, new URLSearchParams(req.url?.split('?')[1]), signed));
         return json(res, 200, result);
+      }
+      if (safetySearch) {
+        if (!canPerformAction(staff.role, 'view_chart')) return json(res, 403, { error: 'forbidden' });
+        const params = new URLSearchParams(req.url?.split('?')[1]);
+        return json(res, 200, readDrugSafety(params.get('yj')));
       }
       if (access && (!isEmrAction(access) || !canPerformAction(staff.role, access))) {
         return json(res, 403, { error: 'forbidden' });

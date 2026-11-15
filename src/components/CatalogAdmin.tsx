@@ -57,6 +57,7 @@ export function CatalogAdmin() {
       <ul className="flex flex-wrap gap-4 text-sm text-teal-800">
         <li><a className="underline" href="https://shinryohoshu.mhlw.go.jp/shinryohoshu/standardMenu/doStandardMasterBz/" target="_blank" rel="noreferrer">厚労省 傷病名</a></li>
         <li><a className="underline" href="https://shinryohoshu.mhlw.go.jp/shinryohoshu/downloadMenu/" target="_blank" rel="noreferrer">厚労省 医薬品・医科診療行為</a></li>
+        <li><a className="underline" href="https://www.pmda.go.jp/safety/info-services/medi-navi/0012.html" target="_blank" rel="noreferrer">PMDA 電子添文の全件ダウンロード案内</a></li>
       </ul>
       <form onSubmit={submit} className="flex flex-wrap items-end gap-3">
         <label className="grid gap-1 text-sm">
@@ -69,6 +70,7 @@ export function CatalogAdmin() {
       </form>
       {message && <p role="status" className="text-sm text-teal-800">{message}</p>}
       {error && <p role="alert" className="text-sm text-red-800">{error}</p>}
+      <p className="text-xs text-slate-600">PMDA電子添文のXMLはこのCSVフォームではなく、ローカルで別途取り込みます。<a className="text-teal-800 underline" href="https://github.com/chinahamu/DENCAL/blob/main/docs/pmda-safety.md" target="_blank" rel="noreferrer">電子添文の取得・SQLite生成手順</a>を参照してください。</p>
       <h2 className="text-sm font-bold">取り込み履歴</h2>
       <ul className="divide-y divide-slate-200 text-sm">
         {releases.map((release) => (
