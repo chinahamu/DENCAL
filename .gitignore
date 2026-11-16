@@ -6,3 +6,7 @@ dist/
 __pycache__/
 .env*
 memo.txt
+
+# Official source files belong to individual users and must not be redistributed.
+/setup-input/masters/
+/setup-input/pmda/

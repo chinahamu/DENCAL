@@ -120,6 +120,21 @@ function parseCatalog(format: typeof formats[keyof typeof formats], marker: stri
   return rows;
 }
 
+/** Validate and parse an official complete master. Used by API upload and first-run setup. */
+export function parseOfficialCatalogFile(filename: string, bytes: Buffer) {
+  const match = /^([bys])_(\d{8})\.(csv|txt)$/.exec(filename);
+  if (!match) throw new CatalogError(400, '公式全件マスターの元のファイル名を指定してください。');
+  const format = formats[match[1] as keyof typeof formats];
+  if (match[3] !== format.extension) throw new CatalogError(400, 'マスターの拡張子が不正です。');
+  let releaseDate: string;
+  try { releaseDate = date(match[2]); }
+  catch { throw new CatalogError(400, 'ファイル名の日付が不正です。'); }
+  if (!releaseDate) throw new CatalogError(400, 'ファイル名の日付が不正です。');
+  if (bytes.length > masterUploadLimit) throw new CatalogError(413, 'マスターが20 MiBを超えています。');
+  const rows = parseCatalog(format, match[1].toUpperCase(), bytes);
+  return { kind: format.kind, releaseDate, sha256: createHash('sha256').update(bytes).digest('hex'), rows };
+}
+
 export async function receiveCatalog(req: IncomingMessage, params: URLSearchParams) {
   if (req.headers['content-type'] !== 'application/octet-stream') {
     throw new CatalogError(415, '解凍したCSVまたはTXTを選んでください。');
@@ -144,8 +159,7 @@ export async function receiveCatalog(req: IncomingMessage, params: URLSearchPara
     chunks.push(chunk);
   }
   const bytes = Buffer.concat(chunks);
-  const rows = parseCatalog(format, match[1].toUpperCase(), bytes);
-  return { kind: format.kind, releaseDate, sha256: createHash('sha256').update(bytes).digest('hex'), rows };
+  return parseOfficialCatalogFile(filename, bytes);
 }
 
 export function saveCatalog(db: DatabaseSync, input: Awaited<ReturnType<typeof receiveCatalog>>) {

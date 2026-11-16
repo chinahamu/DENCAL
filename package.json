@@ -9,12 +9,13 @@
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test": "node --import tsx --test src/utils/emrLogic.test.ts server/clinical.test.ts server/recordSigning.test.ts server/receptOutbox.test.ts integration/recept-v1/contract.test.mjs",
-    "db:init": "python3 database/init.py",
+    "db:init": "node --import tsx tools/setup.ts",
     "records:export": "node --import tsx server/recordTransfer.ts export",
     "records:verify": "node --import tsx server/recordTransfer.ts verify",
     "records:restore": "node --import tsx server/recordTransfer.ts restore",
     "test:integration": "node --test integration/recept-v1/contract.test.mjs",
-    "test:integration:e2e": "node --import tsx --test server/recept.e2e.test.ts"
+    "test:integration:e2e": "node --import tsx --test server/recept.e2e.test.ts",
+    "test:setup": "node --import tsx --test tools/setup.test.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",
