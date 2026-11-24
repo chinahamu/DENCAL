@@ -54,7 +54,7 @@ function run(f: ReturnType<typeof fixture>) {
   ], { cwd: root, encoding: 'utf8', timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
 }
 
-test('one command creates schema v6, all three masters, and PMDA safety DB', (t) => {
+test('one command creates schema v7, all three masters, and PMDA safety DB', (t) => {
   const f = fixture();
   t.after(() => rmSync(f.directory, { recursive: true, force: true }));
   const first = run(f);
@@ -63,7 +63,7 @@ test('one command creates schema v6, all three masters, and PMDA safety DB', (t)
   assert.ok(existsSync(f.safety));
   const db = new DatabaseSync(f.clinical, { readOnly: true });
   try {
-    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 6);
+    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 7);
     const kinds = db.prepare('SELECT kind, COUNT(*) AS n FROM master_items GROUP BY kind ORDER BY kind')
       .all().map(row => [row.kind, row.n]);
     assert.deepEqual(kinds, [['diagnosis', 1], ['drug', 1], ['procedure', 1]]);

@@ -3,12 +3,16 @@ import type { DatabaseSync } from 'node:sqlite';
 import { CLINIC_INFO } from '../src/data/seedData';
 import type { AuditLogEntry, PatientRecord, UserRole } from '../src/types/emr';
 import { canPerformAction, type EmrAction } from '../src/utils/permissions';
-import { allergy, ClinicalError, diagnosis, labOrder, object, prescription, registration, requiredText, soapPatch, vitals } from './clinicalInput';
+import {
+  allergy, ClinicalError, clinicalImageMetadataPatch, clinicalImageUpload, diagnosis, labOrder,
+  MAX_ENCOUNTER_IMAGES, object, prescription, registration, requiredText, soapPatch, vitals,
+} from './clinicalInput';
 import { finalizedRecordDocument, searchFinalizedRecords } from './recordDocuments';
 import { addPerformance, beginReceptSend, cancelPerformance, completeReceptSend, queueRecept, receptWorkspace, type sendRecept } from './receptOutbox';
 import { INITIAL_AUDIT_LOGS, INITIAL_BACKUPS } from './clinicalSeed';
 import {
-  findChart, findEncounterChart, finalizeDraft, prepareRevisionPayload, GENERAL_DEPARTMENT, insertChart, listCharts, saveDraft, saveWorkspace, startCorrection,
+  findChart, findEncounterChart, finalizeDraft, prepareRevisionPayload, GENERAL_DEPARTMENT, insertChart, listCharts,
+  readClinicalImageBlob, saveClinicalImageBlob, saveDraft, saveWorkspace, startCorrection,
   type Actor, type Chart, type SignedFinalization,
 } from './clinicalStore';
 
@@ -18,6 +22,9 @@ const operations = {
   prescription: 'add_prescription',
   remove_prescription: 'add_prescription',
   lab_order: 'add_prescription',
+  image_add: 'record_clinical_image',
+  image_update: 'record_clinical_image',
+  image_remove: 'record_clinical_image',
   finalize: 'sign_soap',
   start_correction: 'edit_soap',
   vitals: 'record_vitals',
@@ -42,6 +49,7 @@ type ClinicalRoute =
   | { kind: 'archive'; method: 'GET'; action: 'export_archive' }
   | { kind: 'admin'; method: 'GET'; action: 'view_audit' }
   | { kind: 'recept'; method: 'GET' | 'POST'; action: EmrAction; patientId: string; operation: ReceptOperation }
+  | { kind: 'patient_image'; method: 'GET'; action: 'view_chart'; patientId: string; imageId: string }
   | { kind: 'patient'; method: 'GET'; action: 'view_chart'; patientId: string }
   | { kind: 'operation'; method: 'POST'; action: EmrAction; patientId: string; operation: Operation };
 
@@ -63,6 +71,10 @@ export function clinicalRoute(path: string, method: string | undefined): Clinica
   }
   if (path === '/api/clinical/archive') return { kind: 'archive', method: 'GET', action: 'export_archive' };
   if (path === '/api/clinical/admin-demo') return { kind: 'admin', method: 'GET', action: 'view_audit' };
+  const imageMatch = /^\/api\/clinical\/patients\/([A-Za-z0-9_-]{1,64})\/images\/([A-Za-z0-9_-]{1,64})$/.exec(path);
+  if (imageMatch) {
+    return { kind: 'patient_image', method: 'GET', action: 'view_chart', patientId: imageMatch[1], imageId: imageMatch[2] };
+  }
   const match = /^\/api\/clinical\/patients\/([A-Za-z0-9_-]{1,64})(?:\/([a-z_]+))?$/.exec(path);
   if (!match) return undefined;
   const [, patientId, operation] = match;
@@ -160,7 +172,8 @@ function referral(db: DatabaseSync, chart: Chart, actor: Actor, body: unknown) {
 
 // SOAP and orders share a version because they are finalized together.
 const draftOperations = new Set<Operation>([
-  'soap', 'diagnosis', 'prescription', 'remove_prescription', 'lab_order', 'finalize', 'start_correction',
+  'soap', 'diagnosis', 'prescription', 'remove_prescription', 'lab_order',
+  'image_add', 'image_update', 'image_remove', 'finalize', 'start_correction',
 ]);
 
 function checkDraftVersion(chart: Chart, body: unknown) {
@@ -229,6 +242,47 @@ function update(db: DatabaseSync, chart: Chart, actor: Actor, operation: Exclude
     case 'lab_order':
       patient.currentLabOrders = toggle(patient.currentLabOrders, labOrder(body));
       break;
+    case 'image_add': {
+      const images = patient.currentImages ?? [];
+      if (images.length >= MAX_ENCOUNTER_IMAGES) throw new ClinicalError(409, 'image_limit_exceeded');
+      const { item, bytes } = clinicalImageUpload(body, actor.name, time);
+      if (images.some((existing) => existing.id === item.id) ||
+          db.prepare('SELECT 1 FROM clinical_image_blobs WHERE image_id = ?').get(item.id)) {
+        throw new ClinicalError(409, 'duplicate_image');
+      }
+      saveClinicalImageBlob(db, chart.row.encounter_id, item, bytes, actor.staffId);
+      patient.currentImages = [...images, item];
+      audit(db, actor, 'CLINICAL_IMAGE_ADD', `処置画像を追加 (${item.bodySite}・${item.phase})`, chart);
+      break;
+    }
+    case 'image_update': {
+      const patch = clinicalImageMetadataPatch(body);
+      const images = patient.currentImages ?? [];
+      const index = images.findIndex((entry) => entry.id === patch.id);
+      if (index < 0) throw new ClinicalError(404, 'not_found');
+      const existing = images[index];
+      const updated = {
+        ...existing,
+        phase: patch.phase,
+        bodySite: patch.bodySite,
+        takenAt: patch.takenAt,
+        caption: patch.caption,
+      };
+      if (patch.pairGroupId) updated.pairGroupId = patch.pairGroupId;
+      else delete updated.pairGroupId;
+      patient.currentImages = images.map((entry, i) => (i === index ? updated : entry));
+      audit(db, actor, 'CLINICAL_IMAGE_UPDATE', `処置画像情報を更新 (${updated.bodySite}・${updated.phase})`, chart);
+      break;
+    }
+    case 'image_remove': {
+      const id = requiredText(object(body).id, 64);
+      const images = patient.currentImages ?? [];
+      const target = images.find((entry) => entry.id === id);
+      if (!target) throw new ClinicalError(404, 'not_found');
+      patient.currentImages = images.filter((entry) => entry.id !== id);
+      audit(db, actor, 'CLINICAL_IMAGE_REMOVE', `処置画像を下書きから除外 (${target.bodySite})`, chart);
+      break;
+    }
     case 'vitals':
       patient.vitalsHistory.unshift(vitals(body, time));
       break;
@@ -264,7 +318,13 @@ export function finishReceptDelivery(db: DatabaseSync, actor: Actor, patientId: 
   return receptWorkspace(db, chart);
 }
 
-export function handleClinical(db: DatabaseSync, route: Exclude<ClinicalRoute, { kind: 'signature_check' }>, actor: Actor, body: unknown, params: URLSearchParams, signed?: SignedFinalization) {
+export function readPatientClinicalImage(db: DatabaseSync, actor: Actor, patientId: string, imageId: string) {
+  if (!canPerformAction(actor.role, 'view_chart')) throw new ClinicalError(403, 'forbidden');
+  const chart = findChart(db, actor, patientId);
+  return readClinicalImageBlob(db, chart.row.encounter_id, imageId);
+}
+
+export function handleClinical(db: DatabaseSync, route: Exclude<ClinicalRoute, { kind: 'signature_check' | 'patient_image' }>, actor: Actor, body: unknown, params: URLSearchParams, signed?: SignedFinalization) {
   if (!canPerformAction(actor.role, route.action)) throw new ClinicalError(403, 'forbidden');
   if (route.kind === 'list') return { patients: listCharts(db, actor) };
   if (route.kind === 'register') return { patient: register(db, actor, body) };
@@ -272,7 +332,7 @@ export function handleClinical(db: DatabaseSync, route: Exclude<ClinicalRoute, {
   if (route.kind === 'record_search') return searchFinalizedRecords(db, actor, params);
   if (route.kind === 'record') {
     const chart = findEncounterChart(db, actor, route.encounterId);
-    const document = finalizedRecordDocument(chart, route.revision);
+    const document = finalizedRecordDocument(chart, route.revision, db);
     const exporting = route.action === 'export_record';
     audit(db, actor, exporting ? 'DOCUMENT_EXPORT' : 'RECORD_VIEW',
       `診療録 第${route.revision}版を${exporting ? '出力' : '閲覧'}`, chart);

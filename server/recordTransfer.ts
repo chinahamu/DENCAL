@@ -13,7 +13,7 @@ function openDatabase(path: string, readOnly: boolean) {
   try {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA trusted_schema = OFF; PRAGMA foreign_keys = ON');
     const version = db.prepare('PRAGMA user_version').get()?.user_version;
-    if (version !== 4 && version !== 5 && version !== CLINICAL_DB_VERSION) {
+    if (version !== 4 && version !== 5 && version !== 6 && version !== CLINICAL_DB_VERSION) {
       throw new Error(`診療録の保存に対応した DENCAL のDB（バージョン 4〜${CLINICAL_DB_VERSION}）を指定してください。`);
     }
     return db;
@@ -36,6 +36,10 @@ function verify(db: DatabaseSync) {
   if (Number(db.prepare('PRAGMA user_version').get()?.user_version) >= 5) {
     const signatures = db.prepare("SELECT count(*) AS total FROM sqlite_schema WHERE type = 'trigger' AND name IN ('clinical_signature_no_update', 'clinical_signature_no_delete', 'clinical_signature_no_replace')").get();
     if (signatures?.total !== 3) throw new Error('署名証跡を保護するトリガーがありません。');
+  }
+  if (Number(db.prepare('PRAGMA user_version').get()?.user_version) >= 7) {
+    const imageTriggers = db.prepare("SELECT count(*) AS total FROM sqlite_schema WHERE type = 'trigger' AND name IN ('clinical_image_blob_no_update', 'clinical_image_blob_no_delete', 'clinical_image_blob_no_replace')").get();
+    if (imageTriggers?.total !== 3) throw new Error('処置画像を保護するトリガーがありません。');
   }
   try {
     const count = verifyClinicalStore(db);

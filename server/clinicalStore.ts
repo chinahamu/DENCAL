@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
-import type { DiseaseRecord, LabOrderItem, PatientRecord, PrescriptionItem, SoapContent, SoapRevision, UserRole } from '../src/types/emr';
+import type { ClinicalImageItem, DiseaseRecord, LabOrderItem, PatientRecord, PrescriptionItem, SoapContent, SoapRevision, UserRole } from '../src/types/emr';
 import { ClinicalError } from './clinicalInput';
 import { evidenceDigest, type SignatureEvidence } from './recordSigning';
 import { INITIAL_PATIENTS } from './clinicalSeed';
 
-export const CLINICAL_DB_VERSION = 6;
+export const CLINICAL_DB_VERSION = 7;
 export const GENERAL_DEPARTMENT = 'demo-general';
 
 const seedDepartments: Record<string, string> = {
@@ -26,7 +26,7 @@ export type Actor = {
 
 type Workspace = Pick<PatientRecord,
   'mynaVerified' | 'allergies' | 'contraindicatedClasses' | 'diseases' | 'vitalsHistory' |
-  'labHistory' | 'currentPrescriptions' | 'currentLabOrders' | 'billingCompleted' | 'receiptIssuedAt'
+  'labHistory' | 'currentPrescriptions' | 'currentLabOrders' | 'currentImages' | 'billingCompleted' | 'receiptIssuedAt'
 >;
 
 type Row = Record<string, SQLOutputValue> & SoapContent & {
@@ -85,6 +85,7 @@ type RevisionContent = {
   prescriptions: PrescriptionItem[];
   labOrders: LabOrderItem[];
   diseases: DiseaseRecord[] | null;
+  images?: ClinicalImageItem[];
 };
 
 export type Chart = { row: Row; patient: PatientRecord };
@@ -95,9 +96,9 @@ function soap(row: SoapContent): SoapContent {
 
 function workspace(patient: PatientRecord): Workspace {
   const { mynaVerified, allergies, contraindicatedClasses, diseases, vitalsHistory, labHistory,
-    currentPrescriptions, currentLabOrders, billingCompleted, receiptIssuedAt } = patient;
+    currentPrescriptions, currentLabOrders, currentImages, billingCompleted, receiptIssuedAt } = patient;
   return { mynaVerified, allergies, contraindicatedClasses, diseases, vitalsHistory, labHistory,
-    currentPrescriptions, currentLabOrders, billingCompleted, receiptIssuedAt };
+    currentPrescriptions, currentLabOrders, ...(currentImages?.length ? { currentImages } : {}), billingCompleted, receiptIssuedAt };
 }
 
 function revisionPayload(patientId: string, entry: RevisionRow, previousHash: string): Buffer {
@@ -159,6 +160,7 @@ function revisionHistory(db: DatabaseSync, row: Row): SoapRevision[] {
       reasonForRevision: entry.correction_reason ?? '',
       soap: soap(entry), prescriptions: content.prescriptions, labOrders: content.labOrders,
       diseases: content.diseases ?? undefined,
+      images: content.images ?? undefined,
       sha256Hash: entry.content_sha256, previousHash,
       ...(evidence && { electronicSignature: {
         timestampUtc: evidence.timestampUtc, signerFingerprint: evidence.signerFingerprint,
@@ -201,6 +203,7 @@ function asChart(db: DatabaseSync, row: Row): Chart {
       visitType: row.visit_type === 'first' ? '初診' : '再診', visitStatus: row.status,
       receptionTime: row.checked_in_at.slice(11, 16), receptionNumber: row.reception_number, chiefComplaint: row.chief_complaint,
       currentSoap: isSigned ? latest.soap : soap(row), isSigned, revisions,
+      currentImages: isSigned ? (latest.images ?? data.currentImages ?? []) : (data.currentImages ?? []),
       ...(isSigned && {
         currentPrescriptions: latest.prescriptions, currentLabOrders: latest.labOrders, diseases: latest.diseases ?? data.diseases,
         signedAt: latest.timestamp, signedBy: latest.authorName, currentHash: latest.sha256Hash,
@@ -248,7 +251,84 @@ export function verifyClinicalStore(db: DatabaseSync): number {
     `).get();
     if (mismatchedEvidence) throw new ClinicalError(409, 'record_integrity_error');
   }
+  if (Number(db.prepare('PRAGMA user_version').get()?.user_version) >= 7) {
+    verifyClinicalImages(db);
+  }
   return count;
+}
+
+export type ImageBlobRow = {
+  image_id: string;
+  encounter_id: number;
+  mime_type: ClinicalImageItem['mimeType'];
+  byte_size: number;
+  width: number;
+  height: number;
+  sha256: string;
+  image_blob: Uint8Array;
+};
+
+export function saveClinicalImageBlob(
+  db: DatabaseSync,
+  encounterId: number,
+  item: ClinicalImageItem,
+  bytes: Buffer,
+  staffId: number,
+) {
+  db.prepare(`
+    INSERT INTO clinical_image_blobs(image_id, encounter_id, mime_type, byte_size, width, height, sha256, image_blob, uploaded_by, uploaded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(item.id, encounterId, item.mimeType, item.byteSize, item.width, item.height, item.sha256, bytes, staffId, item.uploadedAt);
+}
+
+export function readClinicalImageBlob(db: DatabaseSync, encounterId: number, imageId: string): { mimeType: ClinicalImageItem['mimeType']; bytes: Buffer; sha256: string } {
+  const row = db.prepare(`
+    SELECT image_id, encounter_id, mime_type, byte_size, width, height, sha256, image_blob
+    FROM clinical_image_blobs WHERE encounter_id = ? AND image_id = ?
+  `).get(encounterId, imageId) as ImageBlobRow | undefined;
+  if (!row) throw new ClinicalError(404, 'not_found');
+  if (!(row.image_blob instanceof Uint8Array) || row.image_blob.byteLength !== row.byte_size) {
+    throw new ClinicalError(409, 'record_integrity_error');
+  }
+  const bytes = Buffer.from(row.image_blob);
+  const actualSha256 = createHash('sha256').update(bytes).digest('hex');
+  if (actualSha256 !== row.sha256) throw new ClinicalError(409, 'record_integrity_error');
+  return { mimeType: row.mime_type, bytes, sha256: row.sha256 };
+}
+
+export function verifyClinicalImages(db: DatabaseSync) {
+  const blobMap = new Map<string, { encounterId: number; sha256: string; mimeType: string; byteSize: number; width: number; height: number }>();
+  const blobs = db.prepare('SELECT image_id, encounter_id, mime_type, byte_size, width, height, sha256, image_blob FROM clinical_image_blobs').iterate() as Iterable<ImageBlobRow>;
+  for (const row of blobs) {
+    if (!(row.image_blob instanceof Uint8Array) || row.image_blob.byteLength !== row.byte_size) {
+      throw new ClinicalError(409, 'record_integrity_error');
+    }
+    const digest = createHash('sha256').update(row.image_blob).digest('hex');
+    if (digest !== row.sha256) throw new ClinicalError(409, 'record_integrity_error');
+    blobMap.set(row.image_id, {
+      encounterId: row.encounter_id, sha256: row.sha256, mimeType: row.mime_type,
+      byteSize: row.byte_size, width: row.width, height: row.height,
+    });
+  }
+  const checkItems = (encounterId: number, items: ClinicalImageItem[] | undefined) => {
+    if (!items) return;
+    for (const item of items) {
+      const stored = blobMap.get(item.id);
+      if (!stored || stored.encounterId !== encounterId || stored.sha256 !== item.sha256 ||
+          stored.mimeType !== item.mimeType || stored.byteSize !== item.byteSize ||
+          stored.width !== item.width || stored.height !== item.height) {
+        throw new ClinicalError(409, 'record_integrity_error');
+      }
+    }
+  };
+  for (const ws of db.prepare('SELECT encounter_id, data_json FROM clinical_workspaces').iterate() as Iterable<{ encounter_id: number; data_json: string }>) {
+    const parsed = JSON.parse(ws.data_json) as Workspace;
+    checkItems(ws.encounter_id, parsed.currentImages);
+  }
+  for (const rev of db.prepare('SELECT encounter_id, content_json FROM clinical_note_revisions WHERE content_json IS NOT NULL').iterate() as Iterable<{ encounter_id: number; content_json: string }>) {
+    const parsed = JSON.parse(rev.content_json) as RevisionContent;
+    checkItems(rev.encounter_id, parsed.images);
+  }
 }
 
 export function listCharts(db: DatabaseSync, actor: Actor): PatientRecord[] {
@@ -303,6 +383,9 @@ export function saveDraft(db: DatabaseSync, { row, patient }: Chart, actor: Acto
 export function startCorrection(db: DatabaseSync, { row, patient }: Chart, actor: Actor, reason: string, time: string) {
   const latest = patient.revisions[0];
   const { subjective, objective, assessment, plan } = latest.soap;
+  if (latest.images) {
+    patient.currentImages = latest.images;
+  }
   saveWorkspace(db, { row, patient });
   db.prepare(`
     UPDATE clinical_note_drafts SET version = version + 1, is_open = 1, correction_reason = ?,
@@ -347,6 +430,7 @@ function proposedRevision({ row, patient }: Chart, actor: Actor, time: string) {
     enteredByName: row.saved_name, enteredAt: row.saved_at, correctionStartedBy: row.correction_started_by,
     correctionStartedAt: row.correction_started_at, prescriptions: patient.currentPrescriptions,
     labOrders: patient.currentLabOrders, diseases: patient.diseases,
+    ...(patient.currentImages?.length ? { images: patient.currentImages } : {}),
   };
   return revisionRow(row.encounter_id, patient.currentSoap, row.finalized_revision + 1,
     actor.staffId, time, row.correction_reason, content);

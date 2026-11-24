@@ -5,11 +5,11 @@ import { extname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CatalogError, listCatalogs, receiveCatalog, saveCatalog, searchCatalog } from './catalog';
 import { readDrugSafety } from './drugSafety';
-import { clinicalRoute, finishReceptDelivery, handleClinical, prepareClinicalSignature, startReceptDelivery } from './clinical';
+import { clinicalRoute, finishReceptDelivery, handleClinical, prepareClinicalSignature, readPatientClinicalImage, startReceptDelivery } from './clinical';
 import { CLINICAL_DB_VERSION, findEncounterChart, readRevisionSignature, seedClinicalCharts, type Actor, type SignedFinalization } from './clinicalStore';
 import { sendRecept } from './receptOutbox';
 import { loadSigningConfig, signRevision, verifyRevisionSignature } from './recordSigning';
-import { ClinicalError, readClinicalInput } from './clinicalInput';
+import { ClinicalError, MAX_IMAGE_REQUEST_BYTES, readClinicalInput } from './clinicalInput';
 import type { StaffMember } from '../src/types/emr';
 import { canPerformAction, isEmrAction } from '../src/utils/permissions';
 
@@ -90,7 +90,7 @@ function openDatabase(path: string, readOnly: boolean) {
   } finally {
     probe.close();
   }
-  if (version === 2 || version === 3 || version === 4 || version === 5) {
+  if (version === 2 || version === 3 || version === 4 || version === 5 || version === 6) {
     const migration = new DatabaseSync(path);
     try {
       migration.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000; BEGIN IMMEDIATE');
@@ -112,6 +112,11 @@ function openDatabase(path: string, readOnly: boolean) {
       if (version === 5) {
         migration.exec(readFileSync(resolve('database/catalog-details.sql'), 'utf8'));
         migration.exec(readFileSync(resolve('database/recept-outbox.sql'), 'utf8'));
+        migration.exec('PRAGMA user_version = 6');
+        version = 6;
+      }
+      if (version === 6) {
+        migration.exec(readFileSync(resolve('database/clinical-images.sql'), 'utf8'));
         migration.exec(`PRAGMA user_version = ${CLINICAL_DB_VERSION}`);
         version = CLINICAL_DB_VERSION;
       }
@@ -216,7 +221,10 @@ export function createAuthMiddleware() {
       const staff = staffMember(row);
       if (clinical) {
         if (!canPerformAction(staff.role, clinical.action)) return json(res, 403, { error: 'forbidden' });
-        const input = write ? await readClinicalInput(req) : undefined;
+        const maxBytes = clinical.kind === 'operation' && clinical.operation === 'image_add'
+          ? MAX_IMAGE_REQUEST_BYTES
+          : 128 * 1024;
+        const input = write ? await readClinicalInput(req, maxBytes) : undefined;
         function transaction<T>(writing: boolean, action: (actor: Actor) => T): T {
           db!.exec(writing ? 'BEGIN IMMEDIATE' : 'BEGIN');
           try {
@@ -233,6 +241,20 @@ export function createAuthMiddleware() {
             db!.exec('ROLLBACK');
             throw error;
           }
+        }
+
+        if (clinical.kind === 'patient_image') {
+          const image = transaction(false, (actor) =>
+            readPatientClinicalImage(db!, actor, clinical.patientId, clinical.imageId));
+          res.writeHead(200, {
+            'Content-Type': image.mimeType,
+            'Content-Length': String(image.bytes.byteLength),
+            'Cache-Control': 'private, no-store',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'",
+          });
+          res.end(image.bytes);
+          return;
         }
 
         if (clinical.kind === 'signature_check') {

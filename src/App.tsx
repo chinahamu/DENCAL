@@ -125,6 +125,8 @@ export default function App() {
         if (error === 'signing_failed') throw new Error('電子署名またはタイムスタンプに失敗しました。診療録は確定されていません。');
         if (error === 'signature_verification_failed') throw new Error('電子署名またはタイムスタンプの整合性・信頼性を確認できませんでした。');
         if (response.status === 503) throw new Error('診療データの処理に失敗しました。接続状態を確認してください。');
+        if (error === 'image_limit_exceeded') throw new Error('1受診あたりの処置画像の上限（20枚）に達しています。');
+        if (error === 'duplicate_image') throw new Error('同じIDの画像が既に登録されています。');
         if (error === 'stale_draft') throw new Error('別の操作で診療録が更新されました。入力内容を控え、診療録を再読込してから編集してください。');
         if (error === 'record_integrity_error') throw new Error('確定版の整合性を確認できないため、診療録を開けません。');
         throw new Error('すでに処理されたか、現在の状態では実行できません。');
@@ -157,7 +159,10 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
   const [records, setRecords] = useState<PatientRecord[]>([]);
   const [soapDrafts, setSoapDrafts] = useState<Record<string, { version: number; patch: Partial<SoapContent> }>>({});
   const versions = useRef(new Map<string, number>());
-  const versionedOperations = ['diagnosis', 'prescription', 'remove_prescription', 'lab_order', 'start_correction', 'finalize'];
+  const versionedOperations = [
+    'diagnosis', 'prescription', 'remove_prescription', 'lab_order',
+    'image_add', 'image_update', 'image_remove', 'start_correction', 'finalize',
+  ];
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const requests = useRef(new AbortController());
   const [backups, setBackups] = useState<BackupSnapshot[]>([]);
@@ -580,6 +585,9 @@ function Workspace({ currentStaff, onLogout, authorize, clinicalRequest }: Works
             onAddPrescription={(id, item) => changePatient(id, 'prescription', item)}
             onRemovePrescription={(id, prescriptionId) => changePatient(id, 'remove_prescription', { id: prescriptionId })}
             onToggleLabOrder={(id, item) => changePatient(id, 'lab_order', item)}
+            onAddClinicalImage={(id, input) => changePatient(id, 'image_add', input)}
+            onUpdateClinicalImage={(id, input) => changePatient(id, 'image_update', input)}
+            onRemoveClinicalImage={(id, imageId) => changePatient(id, 'image_remove', { id: imageId })}
             onSignAndFinalizeChart={(id) => changePatient(id, 'finalize', {})}
             onAddVitalSign={(id, item) => changePatient(id, 'vitals', item)}
             onAddAllergy={(id, item) => changePatient(id, 'allergy', item)}

@@ -100,6 +100,8 @@ function upgrade(db: DatabaseSync) {
     db.exec(readFileSync(join(root, 'database/clinical-signatures.sql'), 'utf8'));
     db.exec('PRAGMA user_version = 5');
     db.exec(readFileSync(join(root, 'database/recept-outbox.sql'), 'utf8'));
+    db.exec('PRAGMA user_version = 6');
+    db.exec(readFileSync(join(root, 'database/clinical-images.sql'), 'utf8'));
     db.exec('PRAGMA user_version = ' + CLINICAL_DB_VERSION);
     db.exec('COMMIT');
   } catch (error) {

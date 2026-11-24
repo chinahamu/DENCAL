@@ -87,6 +87,24 @@ export interface LabOrderItem {
   points?: number;
 }
 
+export type ClinicalImagePhase = 'before' | 'after' | 'progress' | 'single';
+
+export interface ClinicalImageItem {
+  id: string;
+  sha256: string;
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+  byteSize: number;
+  width: number;
+  height: number;
+  phase: ClinicalImagePhase;
+  pairGroupId?: string;
+  bodySite: string;
+  takenAt: string;
+  caption: string;
+  uploadedBy: string;
+  uploadedAt: string;
+}
+
 export interface SoapContent {
   subjective: string;
   objective: string;
@@ -105,6 +123,7 @@ export interface SoapRevision {
   enteredByName?: string;
   enteredAt?: string;
   diseases?: DiseaseRecord[];
+  images?: ClinicalImageItem[];
   reasonForRevision: string;
   soap: SoapContent;
   prescriptions: PrescriptionItem[];
@@ -140,6 +159,7 @@ export interface PatientRecord {
   currentSoap: SoapContent;
   currentPrescriptions: PrescriptionItem[];
   currentLabOrders: LabOrderItem[];
+  currentImages?: ClinicalImageItem[];
   isSigned: boolean;
   signedAt?: string;
   signedBy?: string;
@@ -222,6 +242,9 @@ export interface AuditLogEntry {
     | 'SOAP_REVISION'
     | 'PRESCRIPTION_ADD'
     | 'DIAGNOSIS_UPDATE'
+    | 'CLINICAL_IMAGE_ADD'
+    | 'CLINICAL_IMAGE_UPDATE'
+    | 'CLINICAL_IMAGE_REMOVE'
     | 'PATIENT_REGISTER'
     | 'BILLING_SETTLE'
     | 'BACKUP_CREATE'

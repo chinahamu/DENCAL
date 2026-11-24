@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
-import type { AllergyItem, DiseaseRecord, LabOrderItem, MasterReference, PatientRegistration, PrescriptionItem, SoapContent, VitalRecord } from '../src/types/emr';
+import type { AllergyItem, ClinicalImageItem, ClinicalImagePhase, DiseaseRecord, LabOrderItem, MasterReference, PatientRegistration, PrescriptionItem, SoapContent, VitalRecord } from '../src/types/emr';
 
 export class ClinicalError extends Error {
   constructor(readonly status: number, message: string) {
@@ -11,13 +12,18 @@ export function invalidInput(): never {
   throw new ClinicalError(400, 'invalid_input');
 }
 
-export async function readClinicalInput(req: IncomingMessage): Promise<unknown> {
+export async function readClinicalInput(req: IncomingMessage, maxBytes = 128 * 1024): Promise<unknown> {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json') invalidInput();
   const length = Number(req.headers['content-length']);
-  if (!Number.isSafeInteger(length) || length < 1 || length > 128 * 1024) invalidInput();
+  if (!Number.isSafeInteger(length) || length < 1 || length > maxBytes) invalidInput();
   const chunks: Buffer[] = [];
+  let total = 0;
   try {
-    for await (const chunk of req) chunks.push(chunk);
+    for await (const chunk of req) {
+      total += chunk.length;
+      if (total > maxBytes) invalidInput();
+      chunks.push(chunk);
+    }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
     return invalidInput();
@@ -160,5 +166,104 @@ export function labOrder(value: unknown): LabOrderItem {
     master: masterReference(input.master),
     code: requiredText(input.code),
     name: requiredText(input.name),
+  };
+}
+
+export const MAX_IMAGE_BLOB_BYTES = 5 * 1024 * 1024;
+export const MAX_IMAGE_REQUEST_BYTES = 8 * 1024 * 1024;
+export const MAX_ENCOUNTER_IMAGES = 20;
+
+const imagePhases: readonly ClinicalImagePhase[] = ['before', 'after', 'progress', 'single'];
+const imageMimeTypes = ['image/jpeg', 'image/png', 'image/webp'] as const;
+
+function hasValidMagicBytes(bytes: Buffer, mimeType: ClinicalImageItem['mimeType']): boolean {
+  if (mimeType === 'image/png') {
+    return bytes.length >= 24 &&
+      bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+      bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a;
+  }
+  if (mimeType === 'image/jpeg') {
+    return bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  }
+  if (mimeType === 'image/webp') {
+    return bytes.length >= 16 &&
+      bytes.subarray(0, 4).toString('ascii') === 'RIFF' &&
+      bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+  }
+  return false;
+}
+
+export function clinicalImageUpload(
+  value: unknown,
+  uploadedBy: string,
+  uploadedAt: string,
+): { item: ClinicalImageItem; bytes: Buffer } {
+  const input = object(value);
+  const id = requiredText(input.id, 64);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) invalidInput();
+  const mimeType = choice(input.mimeType, imageMimeTypes);
+  const width = number(input.width, 1, 8192);
+  const height = number(input.height, 1, 8192);
+  if (!Number.isInteger(width) || !Number.isInteger(height)) invalidInput();
+  const phase = choice(input.phase, imagePhases);
+  const pairGroupId = input.pairGroupId === undefined || input.pairGroupId === ''
+    ? undefined
+    : requiredText(input.pairGroupId, 128);
+  const bodySite = requiredText(input.bodySite, 128);
+  const takenAt = requiredText(input.takenAt, 32);
+  const caption = string(input.caption ?? '', 2000).trim();
+  const rawBase64 = requiredText(input.base64Data, 7_500_000);
+  const cleanBase64 = (rawBase64.includes(',') ? rawBase64.slice(rawBase64.indexOf(',') + 1) : rawBase64).trim();
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(cleanBase64) || cleanBase64.length % 4 !== 0) invalidInput();
+  const bytes = Buffer.from(cleanBase64, 'base64');
+  if (bytes.byteLength < 1 || bytes.byteLength > MAX_IMAGE_BLOB_BYTES || !hasValidMagicBytes(bytes, mimeType)) {
+    invalidInput();
+  }
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  return {
+    bytes,
+    item: {
+      id,
+      sha256,
+      mimeType,
+      byteSize: bytes.byteLength,
+      width,
+      height,
+      phase,
+      ...(pairGroupId ? { pairGroupId } : {}),
+      bodySite,
+      takenAt,
+      caption,
+      uploadedBy,
+      uploadedAt,
+    },
+  };
+}
+
+export function clinicalImageMetadataPatch(value: unknown): {
+  id: string;
+  phase: ClinicalImagePhase;
+  pairGroupId?: string;
+  bodySite: string;
+  takenAt: string;
+  caption: string;
+} {
+  const input = object(value);
+  const id = requiredText(input.id, 64);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) invalidInput();
+  const phase = choice(input.phase, imagePhases);
+  const pairGroupId = input.pairGroupId === undefined || input.pairGroupId === ''
+    ? undefined
+    : requiredText(input.pairGroupId, 128);
+  const bodySite = requiredText(input.bodySite, 128);
+  const takenAt = requiredText(input.takenAt, 32);
+  const caption = string(input.caption ?? '', 2000).trim();
+  return {
+    id,
+    phase,
+    ...(pairGroupId ? { pairGroupId } : {}),
+    bodySite,
+    takenAt,
+    caption,
   };
 }

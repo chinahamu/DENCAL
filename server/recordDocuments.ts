@@ -1,8 +1,9 @@
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import { CLINIC_INFO } from '../src/data/seedData';
+import type { ClinicalImageItem, ClinicalImagePhase } from '../src/types/emr';
 import type { FinalizedRecordDocument, FinalizedRecordPage, FinalizedRecordResult } from '../src/types/records';
 import { calendarDate, ClinicalError } from './clinicalInput';
-import type { Actor, Chart } from './clinicalStore';
+import { readClinicalImageBlob, type Actor, type Chart } from './clinicalStore';
 
 const PAGE_SIZE = 30;
 
@@ -52,7 +53,37 @@ function list(items: string[]): string {
     : '<p>なし</p>';
 }
 
-export function finalizedRecordDocument(chart: Chart, revisionNumber: number): FinalizedRecordDocument {
+const phaseLabels: Record<ClinicalImagePhase, string> = {
+  before: '処置前 (Before)',
+  after: '処置後 (After)',
+  progress: '経過 (Progress)',
+  single: '単発所見 (Single)',
+};
+
+function renderImagesSection(db: DatabaseSync | undefined, encounterId: number, images: ClinicalImageItem[] | undefined): string {
+  if (!images || images.length === 0) return '<p>なし</p>';
+  const renderCard = (img: ClinicalImageItem) => {
+    let imgTag = '';
+    if (db) {
+      const blob = readClinicalImageBlob(db, encounterId, img.id);
+      if (blob.sha256 !== img.sha256) throw new ClinicalError(409, 'record_integrity_error');
+      const dataUrl = `data:${blob.mimeType};base64,${blob.bytes.toString('base64')}`;
+      imgTag = `<img src="${dataUrl}" alt="${escape(img.bodySite)} (${escape(phaseLabels[img.phase])})" />`;
+    }
+    return `<figure class="image-card">
+      ${imgTag}
+      <figcaption>
+        <div><strong>${escape(phaseLabels[img.phase])}</strong> · ${escape(img.bodySite)}</div>
+        <div>撮影日時: ${escape(img.takenAt)}${img.pairGroupId ? ` · ペア: ${escape(img.pairGroupId)}` : ''}</div>
+        ${img.caption ? `<div class="note">${escape(img.caption)}</div>` : ''}
+        <div class="hash">画像 SHA-256: <code>${escape(img.sha256)}</code></div>
+      </figcaption>
+    </figure>`;
+  };
+  return `<div class="image-grid">${images.map(renderCard).join('\n')}</div>`;
+}
+
+export function finalizedRecordDocument(chart: Chart, revisionNumber: number, db?: DatabaseSync): FinalizedRecordDocument {
   const { row, patient } = chart;
   const revision = patient.revisions.find((entry) => entry.revisionNumber === revisionNumber);
   if (!revision) throw new ClinicalError(404, 'not_found');
@@ -62,6 +93,7 @@ export function finalizedRecordDocument(chart: Chart, revisionNumber: number): F
   const prescriptions = revision.prescriptions.map((item) =>
     `${item.drugName} · ${item.dosagePerDay} · ${item.usage} · ${item.days}日分${reference(item)}`);
   const orders = revision.labOrders.map((item) => `${item.name}（${item.code}）${reference(item)}`);
+  const imagesHtml = renderImagesSection(db, row.encounter_id, revision.images);
   const soapSections = [
     ['S 主観的情報', revision.soap.subjective], ['O 客観的情報', revision.soap.objective],
     ['A 評価', revision.soap.assessment], ['P 計画', revision.soap.plan],
@@ -84,7 +116,7 @@ export function finalizedRecordDocument(chart: Chart, revisionNumber: number): F
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>${escape(title)}</title>
 <style>
   @page { size: A4; margin: 15mm; }
@@ -96,6 +128,11 @@ export function finalizedRecordDocument(chart: Chart, revisionNumber: number): F
   dt { font-weight: bold; }
   dd { margin: 0; white-space: pre-wrap; }
   .note { white-space: pre-wrap; }
+  .image-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 1rem; margin: .75rem 0; }
+  .image-card { margin: 0; padding: .75rem; border: 1px solid #ccc; border-radius: .375rem; break-inside: avoid; }
+  .image-card img { display: block; max-width: 100%; max-height: 16rem; width: auto; height: auto; margin: 0 auto .5rem; object-fit: contain; }
+  .image-card figcaption { font-size: .85rem; line-height: 1.45; }
+  .image-card .hash { font-size: .72rem; color: #4b5563; margin-top: .25rem; }
   footer { border-top: 1px solid #777; margin-top: 2rem; padding-top: .5rem; font-size: .8rem; }
   @media print { body { margin: 0; padding: 0; font-size: 10pt; } p, li { orphans: 3; widows: 3; } }
 </style>
@@ -109,6 +146,7 @@ export function finalizedRecordDocument(chart: Chart, revisionNumber: number): F
   <section><h2>傷病名</h2>${diagnoses ? list(diagnoses) : '<p>この版の記録なし</p>'}</section>
   <section><h2>処方</h2>${list(prescriptions)}</section>
   <section><h2>検査オーダ</h2>${list(orders)}</section>
+  <section><h2>処置・患部画像</h2>${imagesHtml}</section>
 </main>
 <footer>
   <p>確定版 SHA-256 <code>${escape(revision.sha256Hash)}</code></p>

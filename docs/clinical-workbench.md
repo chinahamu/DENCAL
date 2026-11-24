@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | 受付一覧・患者基本情報 | `patients`、`patient_insurances`、`encounters`、`departments`、`eligibility_checks` | 患者に複数受診と保険期間を紐付ける。年齢は生年月日と受診日から算出。受付番号は診療科・受付日内で一意 |
 | 主訴・アレルギー・登録傷病 | `encounters`、`patient_alerts`、`patient_diagnoses` | 主訴は受診単位、アレルギーと傷病は患者単位。登録元の受診を参照 |
-| SOAP・処方・検査オーダー | `clinical_note_drafts`、`prescription_orders`、`procedure_orders`、`procedure_performances` | SOAPの4項目は個別に保存。オーダーと実施を分離 |
+| SOAP・処方・検査オーダー・処置画像 | `clinical_note_drafts`、`prescription_orders`、`procedure_orders`、`procedure_performances`、`clinical_image_blobs` | SOAPの4項目は個別に保存。オーダーと実施を分離。患部・ビフォーアフター等の処置画像はSHA-256とともにSQLiteに保存し、確定版に固定 |
 | 検査・バイタル推移 | `vital_signs`、`lab_panels`、`lab_results` | 測定日時・採取日時を使って受診をまたいで表示。BMIは身長・体重から算出 |
 | 版履歴・紹介状 | `clinical_note_revisions`、`note_order_snapshots`、`referral_documents` | 確定版に前版・最終入力者・確定者・確定時刻を記録。訂正開始時に理由を保存し、確定版にSHA-256を記録 |
 | 受付・会計 | `billing_records`、`billing_lines`、`receipts` | 算定結果の内訳、精算、発行情報を分ける |

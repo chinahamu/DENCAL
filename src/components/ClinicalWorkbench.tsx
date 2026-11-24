@@ -45,6 +45,13 @@ import {
 } from '../utils/emrLogic';
 
 import type { CatalogEntry } from '../types/catalog';
+import {
+  ClinicalImagesSection,
+  imageEndpointUrl,
+  PHASE_LABELS,
+  type ClinicalImageUpdateInput,
+  type ClinicalImageUploadInput,
+} from './ClinicalImagesSection';
 import { ReceptTransferView } from './ReceptTransferView';
 import { ClinicalCatalogPicker } from './ClinicalCatalogPicker';
 import { DrugSafetyPanel } from './DrugSafetyPanel';
@@ -68,6 +75,9 @@ interface ClinicalWorkbenchProps {
   onAddPrescription: (patientId: string, item: PrescriptionItem) => Promise<boolean>;
   onRemovePrescription: (patientId: string, prescriptionId: string) => Promise<boolean>;
   onToggleLabOrder: (patientId: string, labOrder: LabOrderItem) => Promise<boolean>;
+  onAddClinicalImage: (patientId: string, input: ClinicalImageUploadInput) => Promise<boolean>;
+  onUpdateClinicalImage: (patientId: string, input: ClinicalImageUpdateInput) => Promise<boolean>;
+  onRemoveClinicalImage: (patientId: string, imageId: string) => Promise<boolean>;
   onSignAndFinalizeChart: (patientId: string) => Promise<boolean>;
   onAddVitalSign: (patientId: string, vital: VitalRecord) => Promise<boolean>;
   onAddAllergy: (patientId: string, allergy: AllergyItem) => Promise<boolean>;
@@ -125,6 +135,9 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   onAddPrescription,
   onRemovePrescription,
   onToggleLabOrder,
+  onAddClinicalImage,
+  onUpdateClinicalImage,
+  onRemoveClinicalImage,
   onSignAndFinalizeChart,
   onAddVitalSign,
   onAddAllergy,
@@ -229,6 +242,7 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
   const canExportReferral = canPerformAction(currentStaff.role, 'export_referral');
   const canAddRx = canPerformAction(currentStaff.role, 'add_prescription') && !selectedPatient?.isSigned && !noteBusy;
   const canRecordVitals = canPerformAction(currentStaff.role, 'record_vitals');
+  const canEditImages = canPerformAction(currentStaff.role, 'record_clinical_image') && !selectedPatient?.isSigned && !noteBusy;
 
   const canAddDiagnosis = canEditSoap && selectedDisease &&
     !selectedPatient?.diseases.some((entry) => entry.master?.code === selectedDisease.code);
@@ -1494,6 +1508,18 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
               </div>
             </div>
 
+            {/* CLINICAL TREATMENT IMAGES (BEFORE / AFTER COMPARISON & ATTACHMENT) */}
+            <ClinicalImagesSection
+              patientId={selectedPatient.id}
+              images={selectedPatient.currentImages ?? []}
+              canEditImages={canEditImages}
+              canQuoteToSoap={canEditSoap}
+              onAddImage={(input) => onAddClinicalImage(selectedPatient.id, input)}
+              onUpdateImage={(input) => onUpdateClinicalImage(selectedPatient.id, input)}
+              onRemoveImage={(imageId) => onRemoveClinicalImage(selectedPatient.id, imageId)}
+              onQuoteToObjective={(text) => handleAppendSoapField('objective', text)}
+            />
+
             <div className="pt-4 border-t border-slate-200 bg-slate-50 -mx-5 -mb-5 p-4 rounded-b-lg space-y-3">
               <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
                 <ClipboardCheck className="w-4 h-4 text-teal-700" />
@@ -1759,11 +1785,36 @@ export const ClinicalWorkbench: React.FC<ClinicalWorkbenchProps> = ({
                     </div>
 
                     <details className="text-xs text-slate-700">
-                      <summary className="cursor-pointer font-semibold">確定時の傷病名・処方・検査</summary>
+                      <summary className="cursor-pointer font-semibold">確定時の傷病名・処方・検査・処置画像</summary>
                       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 mt-2">
                         <dt>傷病名</dt><dd>{rev.diseases?.map((item) => item.name).join('、') || (rev.diseases ? 'なし' : '記録なし')}</dd>
                         <dt>処方</dt><dd>{rev.prescriptions.map((item) => item.drugName).join('、') || 'なし'}</dd>
                         <dt>検査</dt><dd>{rev.labOrders.map((item) => item.name).join('、') || 'なし'}</dd>
+                        <dt>処置画像</dt>
+                        <dd>
+                          {rev.images && rev.images.length > 0 ? (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1">
+                              {rev.images.map((img) => (
+                                <div key={img.id} className="p-2 bg-white border border-slate-200 rounded space-y-1">
+                                  <div className="font-semibold text-slate-900">
+                                    {PHASE_LABELS[img.phase]} · {img.bodySite} ({img.takenAt})
+                                  </div>
+                                  <img
+                                    src={imageEndpointUrl(selectedPatient.id, img.id)}
+                                    alt={`${img.bodySite} (${PHASE_LABELS[img.phase]})`}
+                                    className="max-h-28 w-auto rounded object-contain bg-slate-50"
+                                  />
+                                  {img.caption && <div className="text-slate-600">{img.caption}</div>}
+                                  <div className="text-[10px] font-mono text-slate-500 break-all">
+                                    画像 SHA-256: {img.sha256}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            'なし'
+                          )}
+                        </dd>
                       </dl>
                     </details>
                     <div className="text-[11px] font-mono text-slate-500 tabular-nums space-y-0.5 pt-1">

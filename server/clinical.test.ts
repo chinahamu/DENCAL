@@ -93,7 +93,7 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   const doctor = await login('demo-physician');
   const admin = await login('demo-admin');
   const unassigned = await login('other-doctor');
-  assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 6);
+  assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 7);
   assert.deepEqual(await ids(clerk), ['PT-001042', 'PT-001105', 'PT-001089']);
   assert.deepEqual(await ids(unassigned), []);
   assert.equal((await request(general, unassigned)).status, 404);
@@ -164,6 +164,52 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
     category: 'internal', genericAllowed: false,
   };
   const lab = { id: 'lab-test', code: 'test', name: '試験用' };
+  const samplePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const beforeImage = {
+    id: 'img-before-1',
+    phase: 'before',
+    pairGroupId: '右前腕 ビフォーアフター',
+    bodySite: '右前腕屈側',
+    takenAt: '2026-11-09 09:20',
+    caption: '処置前：切創3cm',
+    mimeType: 'image/png',
+    width: 1,
+    height: 1,
+    base64Data: `data:image/png;base64,${samplePngBase64}`,
+  };
+  const afterImage = {
+    id: 'img-after-1',
+    phase: 'after',
+    pairGroupId: '右前腕 ビフォーアフター',
+    bodySite: '右前腕屈側',
+    takenAt: '2026-11-09 09:40',
+    caption: '処置後：縫合3針・止血確認',
+    mimeType: 'image/png',
+    width: 1,
+    height: 1,
+    base64Data: samplePngBase64,
+  };
+  assert.equal((await edit('image_add', clerk, beforeImage)).status, 403);
+  assert.equal((await edit('image_add', nurse, { ...beforeImage, base64Data: Buffer.from('not-an-image').toString('base64') })).status, 400);
+  await successfulEdit('image_add', nurse, beforeImage);
+  assert.equal((await edit('image_add', nurse, beforeImage)).status, 409);
+  await successfulEdit('image_add', doctor, afterImage);
+  const updatedWithImages = await successfulEdit('image_update', nurse, {
+    id: afterImage.id,
+    phase: 'after',
+    pairGroupId: '右前腕 ビフォーアフター',
+    bodySite: '右前腕屈側',
+    takenAt: '2026-11-09 09:45',
+    caption: '処置後：縫合3針・止血良好',
+  });
+  assert.equal(updatedWithImages.currentImages?.length, 2);
+  assert.equal(updatedWithImages.currentImages?.[1].caption, '処置後：縫合3針・止血良好');
+  const imgRes = await request(`${target}/images/${beforeImage.id}`, clerk);
+  assert.equal(imgRes.status, 200);
+  assert.equal(imgRes.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await imgRes.arrayBuffer()), Buffer.from(samplePngBase64, 'base64'));
+  assert.equal((await request(`${target}/images/${beforeImage.id}`, unassigned)).status, 404);
+
   assert.equal((await edit('prescription', nurse, prescription)).status, 403);
   assert.equal((await edit('lab_order', nurse, lab)).status, 403);
   await successfulEdit('prescription', doctor, prescription);
@@ -177,10 +223,14 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   assert.equal(first.revisions[0].soap.subjective, '医師の記録');
   assert.equal(first.revisions[0].prescriptions[0].id, prescription.id);
   assert.equal(first.revisions[0].labOrders[0].id, lab.id);
+  assert.equal(first.revisions[0].images?.length, 2);
+  assert.equal(first.revisions[0].images?.[0].id, beforeImage.id);
+  assert.equal(first.revisions[0].images?.[1].id, afterImage.id);
   assert.equal(first.vitalsHistory[0].pulse, 60);
   assert.equal((await edit('finalize', doctor)).status, 409);
   assert.equal((await edit('soap', doctor, { subjective: '直接書き換え' })).status, 409);
   assert.equal((await edit('remove_prescription', doctor, { id: prescription.id })).status, 409);
+  assert.equal((await edit('image_remove', nurse, { id: beforeImage.id })).status, 409);
   assert.equal((await edit('start_correction', doctor, { reason: '  ' })).status, 400);
   assert.equal((await edit('start_correction', nurse, { reason: '訂正理由' })).status, 403);
   const correction = await successfulEdit('start_correction', doctor, { reason: '記載誤りの訂正' });
@@ -195,6 +245,7 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   assert.deepEqual(overlappingWrites.map((response) => response.status).sort(), [200, 409]);
   version += 1;
   await successfulEdit('remove_prescription', doctor, { id: prescription.id });
+  await successfulEdit('image_remove', doctor, { id: beforeImage.id });
   middleware = startMiddleware();
   assert.equal((await chart(target, doctor)).correctionReason, '記載誤りの訂正');
   const newRevision = await successfulEdit('finalize', doctor);
@@ -202,6 +253,9 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   assert.equal(newRevision.revisions[0].previousHash, first.revisions[0].sha256Hash);
   assert.equal(newRevision.revisions[0].reasonForRevision, '記載誤りの訂正');
   assert.deepEqual(newRevision.revisions[0].prescriptions, []);
+  assert.equal(newRevision.revisions[0].images?.length, 1);
+  assert.equal(newRevision.revisions[0].images?.[0].id, afterImage.id);
+  assert.equal(newRevision.revisions[1].images?.length, 2);
   assert.equal(newRevision.revisions[0].soap.subjective, correctedText);
   assert.deepEqual(newRevision.revisions[1], first.revisions[0]);
   middleware = startMiddleware();
@@ -212,6 +266,8 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   `).get(patient.id)!.id;
   assert.throws(() => db.prepare('UPDATE clinical_note_revisions SET subjective = ? WHERE encounter_id = ?').run('直接変更', encounterId), /immutable/);
   assert.throws(() => db.prepare('DELETE FROM clinical_note_revisions WHERE encounter_id = ?').run(encounterId), /immutable/);
+  assert.throws(() => db.prepare('UPDATE clinical_image_blobs SET mime_type = ? WHERE encounter_id = ?').run('image/jpeg', encounterId), /immutable/);
+  assert.throws(() => db.prepare('DELETE FROM clinical_image_blobs WHERE encounter_id = ?').run(encounterId), /immutable/);
   assert.throws(() => db.prepare(`
     INSERT OR REPLACE INTO clinical_note_revisions
     SELECT * FROM clinical_note_revisions WHERE encounter_id = ? AND revision = 1
@@ -247,6 +303,8 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   const originalDocument = await document(1, clerk);
   assert.match(originalDocument.html, /診療録 第1版/);
   assert.match(originalDocument.html, /1錠/);
+  assert.match(originalDocument.html, /処置前：切創3cm/);
+  assert.match(originalDocument.html, /data:image\/png;base64,/);
   assert.doesNotMatch(originalDocument.html, /医師の記録を訂正/);
   assert.equal((await request(record + '/3', clerk)).status, 404);
   assert.equal((await request(record + '/1/export', clerk, {})).status, 403);
@@ -257,6 +315,8 @@ test('clinical API preserves authorized drafts and immutable corrections in SQLi
   assert.match(correctedDocument.html, /@page \{ size: A4/);
   assert.match(correctedDocument.html, /訂正理由/);
   assert.match(correctedDocument.html, /&lt;追記&gt; &amp; 注記/);
+  assert.match(correctedDocument.html, /処置後：縫合3針・止血良好/);
+  assert.doesNotMatch(correctedDocument.html, /処置前：切創3cm/);
   assert.doesNotMatch(correctedDocument.html, /<追記>/);
   assert.ok(correctedDocument.html.includes(first.revisions[0].sha256Hash));
   assert.equal(db.prepare("SELECT count(*) AS total FROM audit_events WHERE clinical_summary = '診療録 第2版を出力'").get()?.total, 1);
